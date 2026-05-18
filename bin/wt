@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+# wt — spin up a worktree lane in one command.
+#
+# Usage:
+#   wt [--type <prefix>] <task-slug-or-ticket>     # single lane, one-shot claude (default)
+#   wt --loop [--type <prefix>] <task-slug>        # single lane, wt-loop.sh outer loop (fresh-context iterations to PR)
+#   wt --ralph [--type <prefix>] <EPIC>            # epic lane running the Ralph autonomous loop
+#   wt --branch <name> [--type ...] <slug>         # single lane on an existing branch (e.g. a PR head)
+#   wt --dag [--type <prefix>] <TICKET>            # parse plan DAG, spawn ready-set lanes (dormant)
+#   wt --resolve [--type <prefix>] <TICKET>        # re-spawn ready-set after slices merged (dormant)
+#   wt --print-brief <task-slug-or-ticket>         # resolve + print the brief path, then exit
+#
+# Single-lane behavior:
+#   The task arg resolves to a brief, in order: Linear id (frontmatter `linear:`),
+#   then slug (filename), then epic folder name. Contract: ~/.claude/tickets/README.md.
+#   wt auth-refactor                # slug → ~/.claude/tickets/<area>/auth-refactor.md
+#   wt TEAM-1234                    # Linear id → brief whose frontmatter `linear:` matches
+#                                   (the brief must already exist locally — /scope it if not)
+#   wt raw-throwaway-slug           # slug with no brief → worktree only, no auto-kickoff
+#   wt --ralph billing-epic         # epic (folder with _epic.md) → lane runs epic-parse.sh
+#                                   then ralph.sh; /epic confirms the story order first
+#   wt auth-refactor-round-2        # trailing descriptor → 2nd lane on the same brief
+#   wt --type fix some-bug-slug     # branch fix/some-bug-slug
+#
+# Type prefix defaults to `feature`. Override with --type or WT_TYPE env.
+# Common values: feature, fix, chore, task, refactor.
+#
+# DAG mode:
+#   wt --dag TEAM-1234  → reads ~/.claude/plans/TEAM-1234.md slice-dag block,
+#                       spawns lanes only for slices whose `needs` are merged
+#                       and whose `touches` don't conflict with already-ready
+#                       siblings. No DAG block / single slice → falls back to
+#                       single-lane.
+#   wt --resolve TEAM-1234 → after some slices merge, re-compute ready set and
+#                       spawn newly-unblocked lanes. Skips slices already in
+#                       flight (worktree exists).
+#
+# Env knobs:
+#   WT_TYPE=          branch type prefix (default: feature)
+#   WT_NO_FETCH=1     skip pre-spawn fetch + ff
+#   WT_LAYOUT=        pane|window|session (default: window)
+#   WT_CLAUDE='claude'  full bypass of model/permission flags
+#   WT_MODEL=sonnet   model override (default: opus)
+#   WT_DRY_RUN=1      DAG mode only — print what would spawn, don't actually
+#   WT_DAG=1          equivalent to --dag flag
+#
+# Effect (per lane):
+#   - Worktree at <repo>/.claude/worktrees/<slug>
+#   - Branch <type>/<slug> off current HEAD (skipped if branch already exists)
+#   - Per-lane port stamped in .env.local.port (3100 + lane index)
+#   - .claude/agent-state seeded as IDLE (visible to agent-board)
+#   - In tmux: opens new window running claude, with optional initial prompt
+#   - Outside tmux: prints the path so you can cd in manually
+
+set -euo pipefail
+
+# ---- arg parse -------------------------------------------------------------
+
+mode="single"
+type_prefix="${WT_TYPE:-feature}"
+branch_override=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dag)     mode="dag";     shift ;;
+    --resolve) mode="resolve"; shift ;;
+    --ralph)   mode="ralph";   shift ;;
+    --loop)    mode="loop";    shift ;;
+    --print-brief) mode="print-brief"; shift ;;
+    --type)
+      [[ -z "${2:-}" ]] && { echo "wt: --type requires an argument" >&2; exit 1; }
+      type_prefix="$2"; shift 2 ;;
+    --type=*)  type_prefix="${1#--type=}"; shift ;;
+    --branch)
+      [[ -z "${2:-}" ]] && { echo "wt: --branch requires an argument" >&2; exit 1; }
+      branch_override="$2"; shift 2 ;;
+    --branch=*) branch_override="${1#--branch=}"; shift ;;
+    -h|--help) sed -n '2,/^$/{ s/^# \?//; p; }' "$0"; exit 0 ;;
+    --)        shift; break ;;
+    -*)        echo "wt: unknown flag $1 (try --help)" >&2; exit 1 ;;
+    *)         break ;;
+  esac
+done
+[[ "${WT_DAG:-}" == "1" && "$mode" == "single" ]] && mode="dag"
+
+# --branch only makes sense for a single lane on a pre-existing branch.
+[[ -n "$branch_override" && "$mode" != "single" ]] \
+  && { echo "wt: --branch is single-lane only (not valid with --dag/--resolve)" >&2; exit 1; }
+
+# Sanitize type prefix: lowercase, alnum + dash only.
+type_prefix=$(printf '%s' "$type_prefix" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]//g')
+[[ -z "$type_prefix" ]] && { echo "wt: invalid --type prefix" >&2; exit 1; }
+
+raw=${1:-}
+[[ -z "$raw" ]] && { echo "usage: wt [--loop|--ralph|--dag|--resolve] [--type <prefix>] <task-slug-or-ticket>" >&2; exit 1; }
+
+# Derive a slug descriptor from the plan's first heading.
+#   '# TEAM-1234 — Add foo bar' → 'add-foo-bar'
+derive_descriptor_from_plan() {
+  local plan_file=$1 ticket_upper=$2 title desc
+  [[ -f "$plan_file" ]] || return 1
+  title=$(awk '/^# /{ sub(/^# +/, ""); print; exit }' "$plan_file")
+  [[ -z "$title" ]] && return 1
+  # Strip leading "TICKET" plus optional separator (— : -).
+  title=$(printf '%s' "$title" | sed -E "s/^${ticket_upper}[[:space:]]*([—:-][[:space:]]*)?//I")
+  desc=$(printf '%s' "$title" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+    | cut -c1-50 \
+    | sed -E 's/-+$//')
+  [[ -z "$desc" ]] && return 1
+  printf '%s' "$desc"
+}
+
+TICKETS_DIR="$HOME/.claude/tickets"
+
+# A brief may be a tombstone — first line `moved -> <path>`. Follow it to the real file.
+follow_tombstone() {
+  local f=$1 first target
+  first=$(head -1 "$f" 2>/dev/null)
+  if [[ "$first" =~ ^moved[[:space:]]-\>[[:space:]](.+)$ ]]; then
+    target="${BASH_REMATCH[1]}"
+    target="${target/#\~/$HOME}"
+    [[ -f "$target" ]] && { printf '%s' "$target"; return 0; }
+  fi
+  printf '%s' "$f"
+}
+
+# Find a brief whose frontmatter `linear:` field equals <ID>.
+find_ticket_by_linear() {
+  grep -rlE "^linear:[[:space:]]+$1[[:space:]]*$" "$TICKETS_DIR" --include='*.md' 2>/dev/null | head -1
+}
+
+# Find a brief file named <slug>.md (also matches legacy <ID>.md files mid-migration).
+find_ticket_file() {
+  find "$TICKETS_DIR" -name "$1.md" -type f 2>/dev/null | head -1
+}
+
+# Find an epic directory named <slug> that contains an _epic.md.
+find_epic_dir() {
+  local d
+  while IFS= read -r d; do
+    [[ -f "$d/_epic.md" ]] && { printf '%s' "$d"; return 0; }
+  done < <(find "$TICKETS_DIR" -type d -name "$1" 2>/dev/null)
+  return 1
+}
+
+# Read the frontmatter `linear:` id from a brief (empty if none — i.e. a draft).
+read_linear_id() {
+  awk '
+    /^---[[:space:]]*$/ { fm++; next }
+    fm == 1 && /^linear:/ {
+      sub(/^linear:[[:space:]]*/, ""); gsub(/[[:space:]]/, ""); print; exit
+    }
+    fm >= 2 { exit }
+  ' "$1" 2>/dev/null | tr '[:lower:]' '[:upper:]'
+}
+
+# Resolve a bare id-or-slug to a brief. Order: Linear id (frontmatter) → slug
+# (filename) → epic folder name. Sets ticket_file + is_epic. 0 = hit, 1 = miss.
+resolve_brief() {
+  local cand=$1 cand_upper f d
+  cand_upper=$(printf '%s' "$cand" | tr '[:lower:]' '[:upper:]')
+  ticket_file=""
+  is_epic=0
+
+  if [[ "$cand" =~ ^[A-Za-z]+-[0-9]+$ ]]; then
+    f=$(find_ticket_by_linear "$cand_upper")
+    [[ -z "$f" ]] && f=$(find_ticket_file "$cand_upper")   # legacy <ID>.md fallback
+    if [[ -n "$f" ]]; then
+      ticket_file=$(follow_tombstone "$f")
+      [[ "$(basename "$ticket_file")" == "_epic.md" ]] && is_epic=1
+      return 0
+    fi
+  fi
+
+  f=$(find_ticket_file "$cand")
+  if [[ -n "$f" ]]; then
+    ticket_file=$(follow_tombstone "$f")
+    [[ "$(basename "$ticket_file")" == "_epic.md" ]] && is_epic=1
+    return 0
+  fi
+
+  d=$(find_epic_dir "$cand") || d=""
+  if [[ -n "$d" ]]; then
+    ticket_file="$d/_epic.md"
+    is_epic=1
+    return 0
+  fi
+
+  return 1
+}
+
+# Derive a slug descriptor from a synced ticket file's frontmatter `title:`.
+derive_descriptor_from_ticket() {
+  local ticket_file=$1 title desc
+  [[ -f "$ticket_file" ]] || return 1
+  title=$(awk '/^title:/{ sub(/^title:[[:space:]]*/, ""); print; exit }' "$ticket_file")
+  [[ -z "$title" ]] && return 1
+  desc=$(printf '%s' "$title" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+    | cut -c1-50 \
+    | sed -E 's/-+$//')
+  [[ -z "$desc" ]] && return 1
+  printf '%s' "$desc"
+}
+
+# Resolve <raw> to a brief + worktree slug.
+#   TEAM-1234              → resolve by Linear id; slug = the brief's own slug
+#   TEAM-1234-pr-feedback  → resolve TEAM-1234; slug = team-1234-pr-feedback (2nd lane on it)
+#   auth-refactor          → resolve by slug, then epic folder name; slug = arg as-is
+ticket=""
+slug=""
+ticket_file=""
+plan_slug=""
+is_epic=0
+
+if [[ "$raw" =~ ^([A-Za-z]+-[0-9]+)(-.+)?$ ]]; then
+  ticket=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+  ticket_lower=$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')
+  tail="${BASH_REMATCH[2]:-}"
+  resolve_brief "$ticket" || true
+  if [[ -n "$tail" ]]; then
+    # Explicit descriptor suffix → a second lane on the same brief.
+    slug="${ticket_lower}${tail}"
+    plan_slug="${ticket}${tail}"
+  else
+    plan_slug="$ticket"
+    if [[ -n "$ticket_file" && "$is_epic" == "1" ]]; then
+      slug=$(basename "$(dirname "$ticket_file")")
+    elif [[ -n "$ticket_file" ]]; then
+      base=$(basename "$ticket_file" .md)
+      if [[ "$base" == "$ticket" ]]; then
+        # Legacy <ID>.md brief — derive a descriptor from its title.
+        descriptor=$(derive_descriptor_from_ticket "$ticket_file" || true)
+        [[ -n "$descriptor" ]] && slug="${ticket_lower}-${descriptor}" || slug="$ticket_lower"
+      else
+        slug="$base"
+      fi
+    else
+      slug="$ticket_lower"
+    fi
+  fi
+else
+  slug=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+  plan_slug="$slug"
+  resolve_brief "$slug" || true
+  [[ -n "$ticket_file" && "$is_epic" == "1" ]] && slug=$(basename "$(dirname "$ticket_file")")
+  [[ -n "$ticket_file" ]] && ticket=$(read_linear_id "$ticket_file")
+fi
+
+# --print-brief: resolve only, print the brief path, exit. /pickup calls this so
+# the resolution logic lives in exactly one place.
+if [[ "$mode" == "print-brief" ]]; then
+  [[ -n "$ticket_file" ]] || { echo "wt: no brief found for '$raw'" >&2; exit 1; }
+  printf '%s\n' "$ticket_file"
+  exit 0
+fi
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) \
+  || { echo "wt: not inside a git repo" >&2; exit 1; }
+
+wt_dir="$repo/.claude/worktrees"
+mkdir -p "$wt_dir"
+
+# Pre-spawn fetch + ff. Skip with WT_NO_FETCH=1.
+if [[ -z "${WT_NO_FETCH:-}" ]]; then
+  git -C "$repo" fetch --quiet origin || echo "wt: warning, fetch failed" >&2
+  current=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+  if [[ "$current" == "main" || "$current" == "master" ]]; then
+    if git -C "$repo" merge-base --is-ancestor HEAD "origin/$current" 2>/dev/null; then
+      git -C "$repo" merge --ff-only "origin/$current" \
+        || echo "wt: warning, fast-forward of $current failed (dirty tree?)" >&2
+    fi
+  fi
+fi
+
+layout="${WT_LAYOUT:-window}"
+
+# ---- lane spawn helper -----------------------------------------------------
+# Args: <slug> <branch> <wt_path> <initial-prompt-or-empty> [tmux-label]
+spawn_lane() {
+  local s_slug=$1 s_branch=$2 s_wt=$3 s_initial=$4
+  local s_label="${5:-$s_slug}"
+
+  if [[ "${WT_DRY_RUN:-}" == "1" ]]; then
+    echo "wt[dry-run]: would spawn lane"
+    echo "  slug:     $s_slug"
+    echo "  branch:   $s_branch"
+    echo "  worktree: $s_wt"
+    [[ -n "$s_initial" ]] && echo "  kickoff:  $s_initial"
+    return 0
+  fi
+
+  # If the branch is already checked out in an existing worktree, reuse it —
+  # git forbids a second checkout of the same branch (common when picking up
+  # feedback on a PR whose lane worktree is still around).
+  local existing_wt
+  existing_wt=$(git -C "$repo" worktree list --porcelain \
+    | awk -v b="refs/heads/$s_branch" '
+        /^worktree /{ wt = substr($0, 10) }
+        /^branch /{ if ($2 == b) { print wt; exit } }')
+  if [[ -n "$existing_wt" ]]; then
+    echo "wt: branch '$s_branch' already checked out at $existing_wt — reusing it"
+    s_wt="$existing_wt"
+  elif [[ ! -d "$s_wt" ]]; then
+    # Local branch or remote-only branch (e.g. a PR head fetched into origin/*)
+    # → check it out as-is; git DWIMs a tracking branch from origin/<name>.
+    # Otherwise create a fresh branch off HEAD.
+    if git -C "$repo" rev-parse --verify "$s_branch" >/dev/null 2>&1 \
+       || git -C "$repo" rev-parse --verify "origin/$s_branch" >/dev/null 2>&1; then
+      git -C "$repo" worktree add "$s_wt" "$s_branch"
+    else
+      git -C "$repo" worktree add "$s_wt" -b "$s_branch"
+    fi
+  fi
+
+  # Per-lane port: stamp once. A reused worktree keeps the port it already has.
+  if [[ ! -f "$s_wt/.env.local.port" ]]; then
+    local existing port
+    existing=$(find "$wt_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    port=$((3099 + existing))
+    printf 'PORT=%s\n' "$port" > "$s_wt/.env.local.port"
+  fi
+
+  mkdir -p "$s_wt/.claude"
+  echo "IDLE" > "$s_wt/.claude/agent-state"
+  # Authoritative label for agent-board. Trusted over tmux window-name walk,
+  # which can pick up an unrelated parent window (e.g. cockpit) when the lane
+  # was spawned via `pane` layout or launched manually.
+  printf '%s\n' "$s_label" > "$s_wt/.claude/tmux-window"
+
+  # Optional: invoke a ticket-status sync on spawn so the ticket's `status:`
+  # flips to `active`. WT_TICKET_SYNC may be set to a script accepting a slug
+  # arg (e.g. `tix-sync` companion, or your own). Detached + silenced so it
+  # never slows the spawn. No-ops cleanly when the slug has no ticket.
+  if [[ -n "${WT_TICKET_SYNC:-}" && -x "${WT_TICKET_SYNC}" ]]; then
+    ( "$WT_TICKET_SYNC" "$s_slug" >/dev/null 2>&1 & )
+  fi
+
+  if [[ ! -f "$s_wt/.claude/settings.local.json" ]]; then
+    cat > "$s_wt/.claude/settings.local.json" <<'JSON'
+{
+  "enabledPlugins": {
+    "vercel@claude-plugins-official": false,
+    "claude-md-management@claude-plugins-official": false,
+    "skill-creator@claude-plugins-official": false
+  }
+}
+JSON
+  fi
+
+  local claude_bin claude_cmd
+  claude_bin="${WT_CLAUDE:-claude --dangerously-skip-permissions --model ${WT_MODEL:-opus}}"
+
+  # @@WT_LOOP@@<brief> sentinel → drive the lane via wt-loop.sh instead of
+  # one-shot claude. wt-loop owns the iteration cadence so each fresh-context
+  # iteration stays under the turn-30 halt cliff.
+  if [[ "$s_initial" == @@WT_LOOP@@* ]]; then
+    local brief_path="${s_initial#@@WT_LOOP@@}"
+    claude_cmd="bash $HOME/.claude/scripts/wt-loop.sh $(printf '%q' "$s_wt") $(printf '%q' "$brief_path")"
+  else
+    claude_cmd="$claude_bin"
+    [[ -n "$s_initial" ]] && claude_cmd="$claude_bin $(printf '%q' "$s_initial")"
+  fi
+
+  # Every lane gets an auto-attached monitor pane — see CLAUDE.md "Lane
+  # observability". Policy: no lane runs unmonitored. lane-watch detects
+  # ralph lanes via scripts/ralph/ and renders the right view.
+  # Opt out per-spawn with WT_NO_WATCH=1.
+  local watch_cmd=""
+  if [[ "${WT_NO_WATCH:-0}" != "1" ]]; then
+    watch_cmd="$HOME/.claude/scripts/lane-watch.sh $(printf '%q' "$s_wt")"
+  fi
+
+  if [[ -n "${TMUX:-}" ]]; then
+    case "$layout" in
+      pane)
+        tmux split-window -h -c "$s_wt" "$claude_cmd"
+        tmux select-pane -T "$s_label" 2>/dev/null || true
+        [[ -n "$watch_cmd" ]] && tmux split-window -v -c "$s_wt" "$watch_cmd"
+        ;;
+      window)
+        tmux new-window -n "$s_label" -c "$s_wt" "$claude_cmd"
+        if [[ -n "$watch_cmd" ]]; then
+          tmux split-window -t "$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
+          tmux select-pane -t "$s_label".0
+        fi
+        ;;
+      session)
+        tmux new-session -d -s "wt-$s_label" -c "$s_wt" "$claude_cmd"
+        [[ -n "$watch_cmd" ]] && tmux split-window -t "wt-$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
+        echo "wt: detached session 'wt-$s_label'. Attach: tmux attach -t wt-$s_label"
+        ;;
+      *)
+        echo "wt: unknown WT_LAYOUT=$layout (expected pane|window|session)" >&2
+        exit 1
+        ;;
+    esac
+  elif command -v tmux >/dev/null 2>&1; then
+    # Not inside tmux. Target a dedicated `wt` session (override w/
+    # WT_TMUX_SESSION). Predictable home for lane windows — no alphabetical
+    # guessing, no pollution of the user's cockpit session. Create the session
+    # if missing, else attach a new window to it. Stops callers (orchestrator
+    # agents) from improvising with nohup, which detaches the process from
+    # any pane and loses scrollback.
+    local target_sess="${WT_TMUX_SESSION:-wt}"
+    if tmux has-session -t "$target_sess" 2>/dev/null; then
+      tmux new-window -t "$target_sess" -n "$s_label" -c "$s_wt" "$claude_cmd"
+      echo "wt: spawned window '$s_label' in tmux session '$target_sess'."
+    else
+      tmux new-session -d -s "$target_sess" -n "$s_label" -c "$s_wt" "$claude_cmd"
+      echo "wt: started tmux session '$target_sess' with window '$s_label'."
+    fi
+    if [[ -n "$watch_cmd" ]]; then
+      tmux split-window -t "$target_sess:$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
+      tmux select-pane -t "$target_sess:$s_label".0 2>/dev/null || true
+      echo "    Monitor pane attached (ralph-watch)."
+    fi
+    echo "    Attach: tmux attach -t $target_sess"
+    echo "  worktree: $s_wt"
+    echo "  port:     $port"
+    echo "  branch:   $s_branch"
+  else
+    echo "wt: not in tmux and tmux not installed."
+    echo "  worktree: $s_wt"
+    echo "  port:     $port"
+    echo "  branch:   $s_branch"
+    [[ -n "$s_initial" ]] && echo "  kickoff:  $claude_cmd"
+  fi
+}
+
+# ---- single-lane + ralph modes --------------------------------------------
+
+if [[ "$mode" == "single" || "$mode" == "ralph" || "$mode" == "loop" ]]; then
+  wt_path="$wt_dir/$slug"
+  branch="${branch_override:-${type_prefix}/${slug}}"
+
+  review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. Never run \`gh pr comment\`, \`gh pr review --comment\`, or any \`gh\` command that writes to the PR conversation. Minor/NB findings: include in the final report only."
+
+  initial=""
+  if [[ "$mode" == "loop" ]]; then
+    if [[ -z "$ticket_file" ]]; then
+      echo "wt: --loop needs a ticket brief. /scope '$raw' first." >&2
+      exit 1
+    fi
+    # wt-loop owns the iteration cadence; spawn_lane only puts a brief into the
+    # worktree and starts a shell that runs wt-loop.sh in --print mode.
+    initial="@@WT_LOOP@@${ticket_file}"
+  elif [[ "$mode" == "ralph" ]]; then
+    if [[ "$is_epic" != "1" ]]; then
+      echo "wt: --ralph needs an epic — a folder with an _epic.md at its root." >&2
+      echo "    '$raw' did not resolve to an epic. /scope it into an epic folder first," >&2
+      echo "    or run \`wt $raw\` to work it as a single ticket." >&2
+      exit 1
+    fi
+    initial="Autonomous mode — Ralph loop. Step 1: run \`ralph-bootstrap\` to set up scripts/ralph/ in this worktree. Step 2: project the epic's story list — \`~/.claude/scripts/epic-parse.sh ${ticket_file} > scripts/ralph/prd.json\`. Step 3: stamp the prd.json \`branchName\` with this lane's branch (\`git branch --show-current\`) via jq, and tune \`scripts/ralph/CLAUDE.md\` typecheck/test commands for this repo. Step 4: run \`./scripts/ralph/ralph.sh --tool claude\` — one story per fresh-context iteration, committing as it goes. The _epic.md is the source of truth; each story's NN-<child>.md carries its deep context. When all stories pass (<promise>COMPLETE</promise>), run /ship to open the PR. ${review_rule} Stop only on COMPLETE + PR open, or a genuine blocker (missing credential, repeated failure same root cause)."
+  elif [[ -n "$ticket_file" ]]; then
+    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass. Use /grill-with-docs if the brief is thin, /tdd for the change loop, /handoff at the context threshold instead of compacting. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). After the final slice, run /ship to open the PR and trigger review. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed. Genuine blocker (ambiguity not in the brief, repeated test failure same root cause, missing credential) → stop and report. No inter-slice confirmation."
+  elif [[ -f "$HOME/.claude/plans/${plan_slug}.md" ]]; then
+    # No ticket brief, but a plan exists (e.g. /address-feedback writes
+    # ~/.claude/plans/PR-<num>-feedback.md). Drive the lane off the plan.
+    plan="$HOME/.claude/plans/${plan_slug}.md"
+    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} Stop only when the plan's Done-when is met, or a genuine blocker (ambiguity not in the plan, repeated test failure same root cause, missing credential)."
+  elif [[ -n "$ticket" ]]; then
+    initial="Autonomous mode. No brief found for ${ticket} — and no plan at ~/.claude/plans/${plan_slug}.md. Tell the user to /scope it first, then stop. Do not invent a brief."
+  fi
+
+  spawn_lane "$slug" "$branch" "$wt_path" "$initial" "${ticket:-$slug}"
+  exit 0
+fi
+
+# ---- DAG modes -------------------------------------------------------------
+
+[[ -z "$ticket" ]] && { echo "wt: --dag/--resolve requires a Linear-style ticket ID" >&2; exit 1; }
+
+dag_parser="$HOME/.claude/scripts/dag-parse.sh"
+
+# Run parser. Separate stdout (TSV) from stderr (errors).
+# Export WT_TYPE so dag-parse stamps the right branch prefix.
+export WT_TYPE="$type_prefix"
+set +e
+parse_err=$("$dag_parser" "$ticket" 2>&1 >/dev/null)
+tsv=$("$dag_parser" "$ticket" 2>/dev/null)
+parse_rc=$?
+set -e
+
+case "$parse_rc" in
+  0) : ;;
+  2)
+    echo "wt: $parse_err" >&2
+    exit 2
+    ;;
+  3)
+    echo "wt: no slice-dag block in plan — falling back to single-lane mode" >&2
+    wt_path="$wt_dir/$slug"
+    branch="${type_prefix}/${slug}"
+    plan="$HOME/.claude/plans/${plan_slug}.md"
+    review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. Never run \`gh pr comment\`, \`gh pr review --comment\`, or any \`gh\` command that writes to the PR conversation. Minor/NB findings: include in the final report only."
+    initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. After the final slice, run /ship. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed."
+    spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
+    exit 0
+    ;;
+  4)
+    echo "wt: $parse_err" >&2
+    exit 4
+    ;;
+  *)
+    echo "wt: dag-parse failed (rc=$parse_rc): $parse_err" >&2
+    exit "$parse_rc"
+    ;;
+esac
+
+[[ -z "$tsv" ]] && { echo "wt: dag-parse returned no slices" >&2; exit 4; }
+
+slice_count=$(printf '%s\n' "$tsv" | wc -l | tr -d ' ')
+if [[ "$slice_count" -le 1 ]]; then
+  echo "wt: only one slice in DAG — falling back to single-lane mode"
+  wt_path="$wt_dir/$slug"
+  branch="${type_prefix}/${slug}"
+  plan="$HOME/.claude/plans/${plan_slug}.md"
+  initial="Autonomous mode. Plan at ${plan}. Single-slice plan. Implement it, run /ship."
+  spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
+  exit 0
+fi
+
+# Determine which slices are already merged. Heuristic:
+#   - branch <type>/<slug>-<id> exists AND is reachable from feature branch HEAD,
+#     OR
+#   - branch doesn't exist but a marker file says merged (future-proofing).
+# Feature branch == <type>/<slug> (matches single-lane convention; for DAG plans
+# this is the integration branch the slice lanes merge into).
+feature_branch="${type_prefix}/${slug}"
+feature_ref=""
+if git -C "$repo" rev-parse --verify "$feature_branch" >/dev/null 2>&1; then
+  feature_ref="$feature_branch"
+else
+  # Cockpit HEAD is the implicit base; treat its history as "merged".
+  feature_ref="HEAD"
+fi
+
+is_merged() {
+  local s_branch=$1
+  git -C "$repo" rev-parse --verify "$s_branch" >/dev/null 2>&1 || return 1
+  git -C "$repo" merge-base --is-ancestor "$s_branch" "$feature_ref" 2>/dev/null
+}
+
+# Build parallel arrays (bash 3.2 — no associative).
+ids=();    names=();   needs_arr=(); touches_arr=(); uvs=(); branches=()
+while IFS=$'\t' read -r s_id s_name s_needs s_touches s_uv s_branch; do
+  [[ -z "$s_id" ]] && continue
+  # "-" sentinel from parser → empty.
+  [[ "$s_needs" == "-" ]] && s_needs=""
+  [[ "$s_touches" == "-" ]] && s_touches=""
+  [[ "$s_uv" == "-" ]] && s_uv=""
+  ids+=("$s_id"); names+=("$s_name"); needs_arr+=("$s_needs")
+  touches_arr+=("$s_touches"); uvs+=("$s_uv"); branches+=("$s_branch")
+done <<< "$tsv"
+
+n=${#ids[@]}
+
+# Compute merged set (by slice id) and worktree-exists set.
+merged_ids=""
+inflight_ids=""
+for ((i=0; i<n; i++)); do
+  if is_merged "${branches[$i]}"; then
+    merged_ids="$merged_ids ${ids[$i]}"
+  fi
+  s_wt="$wt_dir/${slug}-${ids[$i]}"
+  if [[ -d "$s_wt" ]]; then
+    inflight_ids="$inflight_ids ${ids[$i]}"
+  fi
+done
+
+contains() { case " $1 " in *" $2 "*) return 0;; *) return 1;; esac; }
+
+# Build candidate ready set: needs all merged, not already merged, not in flight.
+ready_idx=()
+for ((i=0; i<n; i++)); do
+  contains "$merged_ids" "${ids[$i]}" && continue
+  contains "$inflight_ids" "${ids[$i]}" && continue
+  needs="${needs_arr[$i]}"
+  ok=1
+  if [[ -n "$needs" ]]; then
+    IFS=',' read -r -a need_list <<< "$needs"
+    for n_id in "${need_list[@]}"; do
+      [[ -z "$n_id" ]] && continue
+      if ! contains "$merged_ids" "$n_id"; then ok=0; break; fi
+    done
+  fi
+  [[ "$ok" == "1" ]] && ready_idx+=("$i")
+done
+
+if [[ ${#ready_idx[@]} -eq 0 ]]; then
+  if [[ -n "$inflight_ids" ]]; then
+    echo "wt: no newly-ready slices. In flight:$inflight_ids" >&2
+  else
+    echo "wt: no ready slices (all merged or all blocked)" >&2
+  fi
+  exit 0
+fi
+
+# Conflict-check: serialize any ready pair that shares a touches path.
+# Simpler: drop slice j if its touches set intersects an earlier ready slice's.
+spawn_idx=()
+spawn_touches=()
+for i in "${ready_idx[@]}"; do
+  conflict=0
+  IFS=',' read -r -a my_paths <<< "${touches_arr[$i]}"
+  for prev in "${spawn_touches[@]:-}"; do
+    [[ -z "$prev" ]] && continue
+    IFS=',' read -r -a prev_paths <<< "$prev"
+    for p in "${my_paths[@]}"; do
+      [[ -z "$p" ]] && continue
+      for q in "${prev_paths[@]}"; do
+        [[ -z "$q" ]] && continue
+        if [[ "$p" == "$q" ]]; then conflict=1; break 3; fi
+      done
+    done
+  done
+  if [[ "$conflict" == "1" ]]; then
+    echo "wt: deferring ${ids[$i]} (touches conflict with sibling ready slice)" >&2
+  else
+    spawn_idx+=("$i")
+    spawn_touches+=("${touches_arr[$i]}")
+  fi
+done
+
+if [[ "$mode" == "resolve" ]]; then
+  echo "wt --resolve $ticket: merged={$merged_ids } inflight={$inflight_ids } spawning ${#spawn_idx[@]}"
+else
+  echo "wt --dag $ticket: spawning ${#spawn_idx[@]} ready slice(s)"
+fi
+
+plan_path="$HOME/.claude/plans/${plan_slug}.md"
+review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments."
+
+for i in "${spawn_idx[@]}"; do
+  s_id="${ids[$i]}"
+  s_name="${names[$i]}"
+  s_branch="${branches[$i]}"
+  s_slug="${slug}-${s_id}"
+  s_wt="$wt_dir/${s_slug}"
+  s_initial="Autonomous mode, DAG slice. Plan at ${plan_path}. Implement slice ${s_id} (${s_name}) only. Per-layer commits, run type-check + tests. After the slice is committed and pushed, STOP — do not run /ship and do not start another slice. The DAG resolver (\`wt --resolve ${ticket}\`) will re-spawn the next ready set after this slice merges. ${review_rule}"
+  spawn_lane "$s_slug" "$s_branch" "$s_wt" "$s_initial" "${ticket}-${s_id}"
+done

@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# wt-gc — garbage-collect stale worktree lanes.
+#
+# Scans <repo>/.claude/worktrees/<lane>/ under known roots. For each lane whose
+# .claude/agent-state hasn't been touched in $THRESHOLD_HOURS hours, runs safety
+# checks and (if all pass) `git worktree remove` it. Branch is preserved.
+#
+# Usage:
+#   wt-gc                    # default: 10h threshold, real run, logs to ~/.claude/logs/wt-gc.log
+#   wt-gc --dry-run          # report what would happen, change nothing
+#   wt-gc --hours 24         # custom threshold
+#   wt-gc --force            # skip dirty/unpushed safety checks (DANGEROUS)
+#   wt-gc --quiet            # suppress stdout (cron mode); still writes log
+#   wt-gc --reap-merged      # mtime-independent: reap any lane whose PR is MERGED
+#   wt-gc --notify-dirty-hours 120  # dirty lanes older than N hours → NOTIFY (no removal)
+#
+# Safety checks (all must pass, unless --force):
+#   1. State file mtime older than threshold (skipped when --reap-merged matches)
+#   2. Working tree clean (no uncommitted changes) — NEVER skipped, even with --force-merged
+#   3. No unpushed commits on the worktree's branch (or upstream missing AND branch merged to main)
+#
+# Notify channel: ~/.claude/logs/wt-gc-notify.log accumulates NOTIFY lines for
+# dirty-but-very-old lanes. Reviewed manually; not auto-removed (user work preserved).
+#
+# Exit codes: 0 = ran cleanly. 1 = unexpected error.
+
+set -u
+set -o pipefail
+
+ROOTS=("${HOME}/Documents/code")
+THRESHOLD_HOURS=10
+DRY_RUN=0
+FORCE=0
+QUIET=0
+REAP_MERGED=0
+NOTIFY_DIRTY_HOURS=120
+
+LOG_DIR="${HOME}/.claude/logs"
+LOG_FILE="${LOG_DIR}/wt-gc.log"
+NOTIFY_FILE="${LOG_DIR}/wt-gc-notify.log"
+mkdir -p "$LOG_DIR"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)              DRY_RUN=1; shift ;;
+    --force)                FORCE=1; shift ;;
+    --quiet)                QUIET=1; shift ;;
+    --hours)                THRESHOLD_HOURS=${2:?--hours needs a value}; shift 2 ;;
+    --reap-merged)          REAP_MERGED=1; shift ;;
+    --notify-dirty-hours)   NOTIFY_DIRTY_HOURS=${2:?--notify-dirty-hours needs a value}; shift 2 ;;
+    -h|--help)              sed -n '2,40p' "$0"; exit 0 ;;
+    *)                      echo "wt-gc: unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+THRESHOLD_SECS=$(( THRESHOLD_HOURS * 3600 ))
+NOTIFY_SECS=$(( NOTIFY_DIRTY_HOURS * 3600 ))
+NOW=$(date +%s)
+
+log() {
+  local line="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+  printf '%s\n' "$line" >> "$LOG_FILE"
+  (( QUIET )) || printf '%s\n' "$line"
+}
+
+notify() {
+  local line="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+  printf '%s\n' "$line" >> "$NOTIFY_FILE"
+  printf '%s\n' "$line" >> "$LOG_FILE"
+  (( QUIET )) || printf '%s\n' "$line"
+}
+
+# Check if a branch has a MERGED PR. Returns 0 on merged, 1 otherwise.
+# Quiet on gh failures (auth, rate-limit) — caller treats as not-merged.
+branch_pr_merged() {
+  local branch="$1"
+  [[ -n "$branch" ]] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  local pr
+  pr=$(gh pr list --head "$branch" --state merged --json number --jq '.[0].number' 2>/dev/null || true)
+  [[ -n "$pr" && "$pr" != "null" ]]
+}
+
+removed=0
+skipped=0
+notified=0
+considered=0
+
+shopt -s nullglob 2>/dev/null || true
+
+for root in "${ROOTS[@]}"; do
+  [[ -d "$root" ]] || continue
+  for wt in "$root"/*/.claude/worktrees/*/; do
+    [[ -d "$wt" ]] || continue
+    state_file="$wt.claude/agent-state"
+    [[ -f "$state_file" ]] || continue
+
+    considered=$((considered + 1))
+    lane=$(basename "${wt%/}")
+    repo_dir=$(cd "$wt" && git rev-parse --show-toplevel 2>/dev/null || true)
+    main_repo=$(cd "$wt" && git rev-parse --git-common-dir 2>/dev/null | xargs -I{} dirname {} 2>/dev/null || true)
+    # git-common-dir returns the .git dir of the main checkout; its parent is
+    # the main worktree path we hand to `git worktree remove`.
+
+    state_mtime=$(stat -f %m "$state_file" 2>/dev/null || echo "$NOW")
+    age=$(( NOW - state_mtime ))
+    age_h=$(( age / 3600 ))
+
+    # Resolve branch once; needed for both reap-merged gate and safety check #2.
+    branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+    # Gate: either mtime threshold OR (--reap-merged AND PR is MERGED).
+    pr_merged=0
+    if (( REAP_MERGED )) && branch_pr_merged "$branch"; then
+      pr_merged=1
+    fi
+    if (( age < THRESHOLD_SECS )) && (( ! pr_merged )); then
+      continue
+    fi
+
+    if (( ! FORCE )); then
+      # Safety 1: working tree clean. Ignore wt-injected scratch files
+      # (.claude/agent-state, .claude/agent-pid, .env.local.port) — those
+      # are lane infra, not user work.
+      dirty=$(git -C "$wt" status --porcelain 2>/dev/null \
+        | grep -Ev '^\?\? \.(claude/agent-(state|pid)|env\.local\.port)$' || true)
+      if [[ -n "$dirty" ]]; then
+        if (( age >= NOTIFY_SECS )); then
+          notify "NOTIFY $lane — dirty + age ${age_h}h ≥ ${NOTIFY_DIRTY_HOURS}h (branch=${branch:-?}, pr_merged=${pr_merged}) — review manually"
+          notified=$((notified + 1))
+        else
+          log "SKIP $lane — uncommitted changes (age ${age_h}h)"
+        fi
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      # Safety 2: no unpushed commits, OR branch already merged to main/master
+      upstream=$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo "")
+      if [[ -n "$upstream" ]]; then
+        unpushed=$(git -C "$wt" rev-list "${upstream}..HEAD" --count 2>/dev/null || echo "0")
+        if [[ "$unpushed" != "0" ]]; then
+          log "SKIP $lane — $unpushed unpushed commit(s) on $branch (age ${age_h}h)"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      else
+        # No upstream. Only safe if branch is fully merged into main/master.
+        merged_into=""
+        for base in main master; do
+          if git -C "$wt" rev-parse --verify "origin/$base" >/dev/null 2>&1 \
+             && git -C "$wt" merge-base --is-ancestor HEAD "origin/$base" 2>/dev/null; then
+            merged_into="origin/$base"
+            break
+          fi
+        done
+        if [[ -z "$merged_into" ]]; then
+          log "SKIP $lane — no upstream and not merged to main/master (age ${age_h}h)"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      fi
+    fi
+
+    # All checks passed (or --force). Remove the worktree.
+    if (( DRY_RUN )); then
+      log "DRY-RUN would remove $lane (age ${age_h}h, branch=${branch:-?})"
+      removed=$((removed + 1))
+      continue
+    fi
+
+    if [[ -z "$main_repo" || ! -d "$main_repo" ]]; then
+      log "SKIP $lane — could not resolve main repo path"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # --force on the git command: our safety check already cleared the lane
+    # (only wt-scratch files like agent-state are present). git itself still
+    # refuses without --force when ANY untracked file exists.
+    if git -C "$main_repo" worktree remove --force "$wt" 2>>"$LOG_FILE"; then
+      log "REMOVED $lane (age ${age_h}h, branch ${branch:-?} preserved)"
+      removed=$((removed + 1))
+    else
+      log "FAIL $lane — git worktree remove failed (see log)"
+      skipped=$((skipped + 1))
+    fi
+  done
+done
+
+# Prune stale worktree admin entries (refs to dirs that no longer exist).
+for root in "${ROOTS[@]}"; do
+  for repo_dir in "$root"/*/; do
+    [[ -d "$repo_dir/.git" ]] || continue
+    git -C "$repo_dir" worktree prune 2>/dev/null || true
+  done
+done
+
+log "DONE considered=$considered removed=$removed skipped=$skipped notified=$notified threshold=${THRESHOLD_HOURS}h notify_dirty=${NOTIFY_DIRTY_HOURS}h reap_merged=$REAP_MERGED dry_run=$DRY_RUN force=$FORCE"

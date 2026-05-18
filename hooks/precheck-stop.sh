@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Stop hook: run project-defined precheck if .claude/precheck.sh exists.
+#
+# Per-project contract: each repo opts in by dropping an executable
+# .claude/precheck.sh that exits non-zero on failure. Recommended contents:
+#   #!/usr/bin/env bash
+#   set -e
+#   bun type-check     # fast; fine to run every turn
+#   # bun test         # SLOW — do NOT add unless you really want every turn to wait
+#
+# Behavior:
+#   - The check runs in the BACKGROUND so it never blocks an agent turn.
+#   - agent-state flips to RUNNING:precheck immediately, then DONE / FAILED
+#     when the background job finishes. agent-board picks it up on next refresh.
+#   - If a new Stop fires while a precheck is already running, the old one is
+#     killed and replaced. Caller never has to wait.
+
+set -u
+
+dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+[[ -z "$dir" ]] && exit 0
+
+script="$dir/.claude/precheck.sh"
+[[ -x "$script" ]] || exit 0
+
+mkdir -p "$dir/.claude"
+
+state_file="$dir/.claude/agent-state"
+log="$dir/.claude/precheck.log"
+pid_file="$dir/.claude/precheck.pid"
+
+# Kill any previously running precheck for this project.
+if [[ -f "$pid_file" ]]; then
+  prev=$(cat "$pid_file" 2>/dev/null || true)
+  if [[ -n "$prev" ]] && kill -0 "$prev" 2>/dev/null; then
+    kill "$prev" 2>/dev/null || true
+  fi
+fi
+
+echo "RUNNING:precheck" > "$state_file"
+
+# Fully detach the worker. Stop hook returns immediately; no blocking.
+(
+  if "$script" >"$log" 2>&1; then
+    echo "DONE" > "$state_file"
+  else
+    step=$(grep -oE '^(typecheck|test|lint|build)' "$log" 2>/dev/null | head -n1)
+    echo "FAILED:${step:-precheck}" > "$state_file"
+  fi
+  rm -f "$pid_file"
+) </dev/null >/dev/null 2>&1 &
+worker_pid=$!
+disown 2>/dev/null || true
+echo "$worker_pid" > "$pid_file"
+
+exit 0
