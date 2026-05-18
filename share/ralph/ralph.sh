@@ -82,6 +82,7 @@ if [ ! -f "$PROGRESS_FILE" ]; then
 fi
 
 echo "Starting Ralph - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
+echo "Live log: tail -F $ITER_LOG_DIR/latest.log"
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   echo ""

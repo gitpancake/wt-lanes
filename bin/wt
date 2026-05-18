@@ -331,6 +331,11 @@ spawn_lane() {
   # was spawned via `pane` layout or launched manually.
   printf '%s\n' "$s_label" > "$s_wt/.claude/tmux-window"
 
+  # Record the cwd that spawned this lane so agent-board can nest spawned
+  # lanes under their parent (e.g. a Ralph lane shown as a child of the
+  # lane that invoked `wt --ralph`). WT_PARENT_CWD overrides for scripted use.
+  printf '%s\n' "${WT_PARENT_CWD:-$PWD}" > "$s_wt/.claude/parent-cwd"
+
   # Optional: invoke a ticket-status sync on spawn so the ticket's `status:`
   # flips to `active`. WT_TICKET_SYNC may be set to a script accepting a slug
   # arg (e.g. `tix-sync` companion, or your own). Detached + silenced so it
@@ -385,7 +390,9 @@ JSON
         tmux new-window -n "$s_label" -c "$s_wt" "$claude_cmd"
         if [[ -n "$watch_cmd" ]]; then
           tmux split-window -t "$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
-          tmux select-pane -t "$s_label".0
+          # Focus the claude pane (left of the just-split watch pane).
+          # Don't target "$s_label.0" — fails under `pane-base-index 1`.
+          tmux select-pane -t "$s_label" -L 2>/dev/null || true
         fi
         ;;
       session)
@@ -415,7 +422,7 @@ JSON
     fi
     if [[ -n "$watch_cmd" ]]; then
       tmux split-window -t "$target_sess:$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
-      tmux select-pane -t "$target_sess:$s_label".0 2>/dev/null || true
+      tmux select-pane -t "$target_sess:$s_label" -L 2>/dev/null || true
       echo "    Monitor pane attached (ralph-watch)."
     fi
     echo "    Attach: tmux attach -t $target_sess"
