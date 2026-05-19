@@ -12,8 +12,10 @@
 #
 # Single-lane behavior:
 #   The task arg resolves to a brief, in order: Linear id (frontmatter `linear:`),
-#   then slug (filename), then epic folder name. Contract: ~/.claude/tickets/README.md.
-#   wt auth-refactor                # slug → ~/.claude/tickets/<area>/auth-refactor.md
+#   then slug (filename), then epic folder name. Contract: $TICKETS_DIR/README.md
+#   ($TICKETS_DIR defaults to ~/.claude/tickets; the zsh chpwd hook scopes it to
+#   ~/.claude/tickets/<project>/ inside a repo).
+#   wt auth-refactor                # slug → $TICKETS_DIR/<area>/auth-refactor.md
 #   wt TEAM-1234                    # Linear id → brief whose frontmatter `linear:` matches
 #                                   (the brief must already exist locally — /scope it if not)
 #   wt raw-throwaway-slug           # slug with no brief → worktree only, no auto-kickoff
@@ -112,7 +114,7 @@ derive_descriptor_from_plan() {
   printf '%s' "$desc"
 }
 
-TICKETS_DIR="$HOME/.claude/tickets"
+TICKETS_DIR="${TICKETS_DIR:-$HOME/.claude/tickets}"
 
 # A brief may be a tombstone — first line `moved -> <path>`. Follow it to the real file.
 follow_tombstone() {
