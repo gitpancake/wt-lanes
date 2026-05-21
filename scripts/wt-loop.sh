@@ -85,7 +85,7 @@ for i in $(seq 1 "$MAX_ITERS"); do
 Brief at $BRIEF. Read it.
 Plan slices inline — no separate scoping pass.
 Per slice: type-check + tests, commit per layer (schema → backend → frontend).
-The session will hard-halt at turn 30; before then, commit current progress.
+The session will hard-halt at turn 20; before then, commit current progress.
 auto-handoff.sh will capture state. wt-loop will spawn iteration 2 to /resume.
 When all slices land, run /ship. ${review_rule}
 Stop only on: PR open + review-driven fixes pushed, or a genuine blocker
@@ -99,7 +99,7 @@ Stop only on: PR open + review-driven fixes pushed, or a genuine blocker
     prompt="Autonomous mode — wt-loop iteration $i. /resume $handoff
 Continue from where the prior iteration left off — the handoff doc carries
 state, active files, and next-steps. Same slice protocol + commit cadence.
-The session will hard-halt at turn 30; commit progress before then.
+The session will hard-halt at turn 20; commit progress before then.
 When all slices land, /ship. ${review_rule}"
   fi
 
