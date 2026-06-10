@@ -11,7 +11,14 @@ set -u
 
 source "$HOME/.claude/hooks/_state-write.sh"
 
-VALID_CODES=(ambiguity creds test-loop merge-conflict verify scope external review input)
+# Vocab single source: share/state-codes.sh, installed by install.sh.
+codes_file="$HOME/.claude/state-codes.sh"
+if [[ ! -f "$codes_file" ]]; then
+  printf 'lane-pause: %s missing — re-run wt-lanes install.sh\n' "$codes_file" >&2
+  exit 2
+fi
+source "$codes_file"
+VALID_CODES=($WT_CODES_ALL)
 
 usage() {
   printf 'usage: lane-pause.sh <code> <detail>\n' >&2

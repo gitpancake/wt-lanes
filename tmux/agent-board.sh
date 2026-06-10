@@ -101,15 +101,17 @@ PY
 
 now=$(date +%s)
 
-# Reason-code vocab. Mirrors ~/.claude/agent-state-vocab.md.
+# Reason-code vocab from the shared single source (share/state-codes.sh,
+# installed at ~/.claude/state-codes.sh). Missing file → every code reads
+# as unknown → callers default to red, the safe direction.
+[[ -f "$HOME/.claude/state-codes.sh" ]] && source "$HOME/.claude/state-codes.sh"
+
 # Returns class (red|yellow|dim) for a code, empty if unknown.
 class_for_code() {
-  case "$1" in
-    ambiguity|creds|test-loop|merge-conflict|verify|scope|input) printf 'red' ;;
-    external) printf 'yellow' ;;
-    review)   printf 'dim' ;;
-    *)        printf '' ;;
-  esac
+  case " ${WT_CODES_RED:-} " in *" $1 "*) printf 'red'; return ;; esac
+  case " ${WT_CODES_YELLOW:-} " in *" $1 "*) printf 'yellow'; return ;; esac
+  case " ${WT_CODES_DIM:-} " in *" $1 "*) printf 'dim'; return ;; esac
+  printf ''
 }
 
 # Sort priority: lower number = higher up the board.

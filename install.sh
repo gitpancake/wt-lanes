@@ -39,7 +39,7 @@ optional() {
 require git "https://git-scm.com"
 require tmux "brew install tmux  /  apt install tmux"
 require bash "shipped with your OS"
-optional jq "brew install jq  /  apt install jq — needed for the settings.json auto-merger"
+optional jq "brew install jq  /  apt install jq — used by the PreToolUse state hook to extract tool names; degrades to 'thinking'"
 optional terminal-notifier "brew install terminal-notifier — macOS lane notifications"
 optional notify-send "apt install libnotify-bin — linux lane notifications"
 
@@ -75,6 +75,7 @@ done
 
 # share
 link "$REPO_DIR/share/agent-state-vocab.md" "$HOME/.claude/agent-state-vocab.md"
+link "$REPO_DIR/share/state-codes.sh" "$HOME/.claude/state-codes.sh"
 
 # tmux agent-board
 link "$REPO_DIR/tmux/agent-board.sh" "$HOME/.tmux/agent-board.sh"

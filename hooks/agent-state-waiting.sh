@@ -12,8 +12,10 @@ source "$HOME/.claude/hooks/_state-write.sh"
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 existing=$(tail -n1 "$dir/.claude/agent-state" 2>/dev/null || true)
 
-KNOWN='ambiguity|creds|test-loop|merge-conflict|verify|scope|external|review|input'
-if [[ "$existing" =~ ^WAITING:($KNOWN): ]]; then
+# Any tagged pause survives — lane-pause validates codes against the vocab
+# at write time, and the board defaults unknown codes to red. No vocab copy
+# needed here.
+if [[ "$existing" =~ ^WAITING:[a-z-]+: ]]; then
   exit 0
 fi
 
