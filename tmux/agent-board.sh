@@ -17,8 +17,9 @@ if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" && -n "${AGENT_BOARD_WINDOW_NAME:-}"
   tmux rename-window -t "$TMUX_PANE" "$AGENT_BOARD_WINDOW_NAME" 2>/dev/null || true
 fi
 
-# Roots scanned for worktrees. Add more as needed.
-ROOTS=("${HOME}/Documents/code")
+# Roots scanned for worktrees. Colon-separated dirs, PATH-style.
+# Shared convention with wt-gc — override both via WT_ROOTS.
+IFS=':' read -r -a ROOTS <<< "${WT_ROOTS:-$HOME/Documents/code}"
 
 reset=$'\033[0m'
 red=$'\033[31m'
