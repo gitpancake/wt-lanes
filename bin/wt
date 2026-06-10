@@ -318,10 +318,22 @@ spawn_lane() {
   fi
 
   # Per-lane port: stamp once. A reused worktree keeps the port it already has.
-  if [[ ! -f "$s_wt/.env.local.port" ]]; then
-    local existing port
-    existing=$(find "$wt_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-    port=$((3099 + existing))
+  # Allocate max(stamped sibling ports)+1, not 3099+dir-count — a dir count
+  # shrinks when wt-gc reaps an old lane and would hand a live sibling's port
+  # to the next spawn.
+  local port=""
+  if [[ -f "$s_wt/.env.local.port" ]]; then
+    port=$(sed -n 's/^PORT=//p' "$s_wt/.env.local.port" | head -1)
+  else
+    local port_file sibling_port max_port=3099
+    for port_file in "$wt_dir"/*/.env.local.port; do
+      [[ -f "$port_file" ]] || continue
+      sibling_port=$(sed -n 's/^PORT=//p' "$port_file" | head -1)
+      if [[ "$sibling_port" =~ ^[0-9]+$ ]] && (( sibling_port > max_port )); then
+        max_port=$sibling_port
+      fi
+    done
+    port=$((max_port + 1))
     printf 'PORT=%s\n' "$port" > "$s_wt/.env.local.port"
   fi
 
