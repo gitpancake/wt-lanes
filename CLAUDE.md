@@ -11,8 +11,10 @@ Three roles in the system:
 2. **State machine** — hooks (`hooks/agent-state-*.sh`, `hooks/precheck-stop.sh`)
    are the *only* writers of `<wt>/.claude/agent-state`. They run inside
    Claude Code, registered in the user's `~/.claude/settings.json`.
-3. **Consumer** — `tmux/agent-board.sh` and `scripts/lane-watch.sh` read the
-   state file and render. Never write to it.
+3. **Consumer** — `tmux/agent-board.py` (via the `agent-board.sh` launcher)
+   and `scripts/lane-watch.sh` read the state file and render. One sanctioned
+   write: the board's stale-reap resets ACTIVE/WAITING/RUNNING to IDLE when
+   the recorded agent pid is dead (writer crashed without firing Stop).
 
 ## Invariants
 
@@ -26,8 +28,11 @@ Three roles in the system:
    and `~/.claude/hooks`. install.sh symlinks files there. Do not
    `dirname $0`-relative — bins are symlinked onto PATH and would lose
    their repo location.
-4. **Bash only.** No Python except where the existing scripts already use
-   it (none in this bundle). Stays scriptable in any tmux pane.
+4. **Bash for glue, python for the board.** Spawner, gc, hooks, and lane
+   scripts stay bash 3.2-compatible (scriptable in any tmux pane, no
+   startup cost on hooks). The agent-board is python (`tmux/agent-board.py`)
+   — it outgrew bash (assoc-array workarounds, awk scans per lane per tick;
+   the port renders ~27x faster). Don't add python to the hooks.
 5. **Cockpit is a structural concept.** The agent-board has a LANES
    section (worktree-backed) and a COCKPIT section (live Claude sessions
    outside worktrees). The two are distinct rendering paths — don't merge.
@@ -69,9 +74,9 @@ All symlinks. Edits in the clone land immediately.
 
 - `bin/wt` is the spawn contract. Adding flags is fine; changing existing
   flag semantics is breaking.
-- `tmux/agent-board.sh` runs every 2s inside `watch`. Keep render fast —
-  any per-lane data must cache via mtime+size keyed files (see
-  `<wt>/.claude/ctx-cache`).
+- `tmux/agent-board.py` runs every 2s inside `watch` (launched through
+  `agent-board.sh`). Keep render fast — any per-lane data must cache via
+  mtime+size keyed files (see `<wt>/.claude/ctx-cache`).
 - Hooks run on every Claude tool call. Keep them <10ms. If you need
   network or heavy IO, fork.
 - `_state-write.sh` walks the process tree to find the Claude pid and
