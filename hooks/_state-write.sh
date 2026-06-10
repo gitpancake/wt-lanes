@@ -2,8 +2,8 @@
 # Shared helper: source-and-call from every state-writing hook.
 #
 # Writes <project>/.claude/agent-state and refreshes <project>/.claude/agent-pid
-# with the parent Claude process PID (walks up the process tree, same logic as
-# tool-loop-warn.sh). The board uses agent-pid to detect orphaned lanes.
+# with the parent Claude process PID (walks up the process tree). The board
+# uses agent-pid to detect orphaned lanes.
 #
 # Usage in a hook:
 #   source "$HOME/.claude/hooks/_state-write.sh"

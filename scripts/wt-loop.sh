@@ -8,9 +8,9 @@
 #   N=1   → kick off with the brief + slice plan instructions.
 #   N>1   → /resume the most recent handoff for this branch and keep going.
 #
-# Between iterations the agent exits naturally; auto-handoff.sh has
-# already written ~/.claude/handoffs/<UTC>-auto-<branch>.md, so iter N+1
-# starts with a fresh context that reads back that doc.
+# Between iterations the agent exits naturally; if the prior iteration
+# wrote a handoff (/handoff or a /clear capture) to ~/.claude/handoffs/,
+# iter N+1 starts with a fresh context that reads back that doc.
 #
 # Exit conditions:
 #   - PR open on this branch AND reviewDecision == APPROVED  → success
