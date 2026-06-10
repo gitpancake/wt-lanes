@@ -490,14 +490,17 @@ fi
 
 dag_parser="$HOME/.claude/scripts/dag-parse.sh"
 
-# Run parser. Separate stdout (TSV) from stderr (errors).
+# Run parser once, splitting stdout (TSV) from stderr (errors) via a temp
+# file — two runs would waste a parse and race a concurrent plan edit.
 # Export WT_TYPE so dag-parse stamps the right branch prefix.
 export WT_TYPE="$type_prefix"
+parse_err_file=$(mktemp "${TMPDIR:-/tmp}/wt-dag-parse.XXXXXX")
 set +e
-parse_err=$("$dag_parser" "$ticket" 2>&1 >/dev/null)
-tsv=$("$dag_parser" "$ticket" 2>/dev/null)
+tsv=$("$dag_parser" "$ticket" 2>"$parse_err_file")
 parse_rc=$?
 set -e
+parse_err=$(cat "$parse_err_file")
+rm -f "$parse_err_file"
 
 case "$parse_rc" in
   0) : ;;
