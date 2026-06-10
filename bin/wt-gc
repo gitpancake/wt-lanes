@@ -37,7 +37,7 @@ QUIET=0
 REAP_MERGED=0
 NOTIFY_DIRTY_HOURS=120
 
-LOG_DIR="${HOME}/.claude/logs"
+LOG_DIR="${WT_GC_LOG_DIR:-${HOME}/.claude/logs}"
 LOG_FILE="${LOG_DIR}/wt-gc.log"
 NOTIFY_FILE="${LOG_DIR}/wt-gc-notify.log"
 mkdir -p "$LOG_DIR"
@@ -128,11 +128,13 @@ for root in "${ROOTS[@]}"; do
     fi
 
     if (( ! FORCE )); then
-      # Safety 1: working tree clean. Ignore wt-injected scratch files
-      # (.claude/agent-state, .claude/agent-pid, .env.local.port) — those
-      # are lane infra, not user work.
+      # Safety 1: working tree clean. Ignore untracked paths under .claude/
+      # — that's where ALL wt/hook scratch lives (agent-state, agent-pid,
+      # tmux-window, parent-cwd, ctx-cache, settings.local.json, precheck
+      # logs), and git collapses the whole dir to '?? .claude/' anyway —
+      # plus .env.local.port. Modified TRACKED files still count as dirty.
       dirty=$(git -C "$wt" status --porcelain 2>/dev/null \
-        | grep -Ev '^\?\? \.(claude/agent-(state|pid)|env\.local\.port)$' || true)
+        | grep -Ev '^\?\? (\.claude/|\.env\.local\.port$)' || true)
       if [[ -n "$dirty" ]]; then
         if (( age >= NOTIFY_SECS )); then
           notify "NOTIFY $lane — dirty + age ${age_h}h ≥ ${NOTIFY_DIRTY_HOURS}h (branch=${branch:-?}, pr_merged=${pr_merged}) — review manually"
