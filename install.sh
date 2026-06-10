@@ -7,7 +7,6 @@
 #   bin/*                   →  ~/.local/bin/                (on PATH)
 #   scripts/*               →  ~/.claude/scripts/           (called by absolute path)
 #   hooks/*                 →  ~/.claude/hooks/             (registered in settings.json)
-#   share/ralph             →  ~/.claude/ralph              (read by ralph-bootstrap)
 #   share/agent-state-vocab →  ~/.claude/agent-state-vocab.md
 #   tmux/agent-board.sh     →  ~/.tmux/agent-board.sh       (pinned status board)
 #
@@ -75,7 +74,6 @@ for f in "$REPO_DIR"/hooks/*; do
 done
 
 # share
-link "$REPO_DIR/share/ralph" "$HOME/.claude/ralph"
 link "$REPO_DIR/share/agent-state-vocab.md" "$HOME/.claude/agent-state-vocab.md"
 
 # tmux agent-board

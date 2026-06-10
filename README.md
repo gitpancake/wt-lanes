@@ -1,6 +1,6 @@
 # wt-lanes
 
-Parallel autonomous lanes for Claude Code — a worktree per ticket, a tmux pane
+Parallel autonomous lanes for Pi — a worktree per ticket, a tmux pane
 per lane, one status board that watches them all.
 
 ```
@@ -13,22 +13,21 @@ sla-tracking                  WAITING:review     32K
 
 ## What it is
 
-A small bundle of bash + tmux glue that turns Claude Code from "one terminal
+A small bundle of bash + tmux glue that turns Pi from "one terminal
 window" into "an arbitrary number of fire-and-forget lanes you can see at a
 glance." The unit of work is a git worktree on its own branch, driven by its
-own Claude Code session, observable from a pinned status board.
+own Pi session, observable from a pinned status board.
 
 The pieces:
 
 | Piece | Role |
 |---|---|
-| `wt <slug>` | Spawner. Creates a worktree, a branch, an agent-state file, and a tmux window/pane running `claude`. The lane is fire-and-forget from there. |
-| `wt-gc` | Reaper. Cleans up lanes whose worktree is gone or whose Claude pid is dead. |
+| `wt <slug>` | Spawner. Creates a worktree, a branch, an agent-state file, and a tmux window/pane running `pi --model openai-codex/gpt-5.5`. The lane is fire-and-forget from there. |
+| `wt-gc` | Reaper. Cleans up lanes whose worktree is gone or whose agent pid is dead. |
 | `agent-board` | The status board. Reads every lane's `agent-state` file, renders one row per lane, color-coded. Pin it in a tmux pane. |
-| `lane-watch` | Per-lane monitor pane. Renders one lane's state + git + Ralph progress. Attached automatically by `wt`. |
+| `lane-watch` | Per-lane monitor pane. Renders one lane's state + git status. Attached automatically by `wt`. |
 | `lane-pause` | Manual state writer. Call from inside a lane to record why you've paused (`review`, `ambiguity`, `creds`, etc.). |
-| Hooks | `agent-state-active`, `agent-state-idle`, `agent-state-waiting`, `precheck-stop` — Claude Code hooks that keep the state file in sync with what the agent is actually doing. |
-| Ralph | Optional autonomous epic loop. `wt --ralph <epic>` spawns a lane that grinds one story per fresh-context iteration. |
+| Hooks | `agent-state-active`, `agent-state-idle`, `agent-state-waiting`, `precheck-stop` — optional legacy Claude Code hooks that keep the state file in sync with what the agent is actually doing. |
 
 ## Install
 
@@ -46,7 +45,7 @@ Uninstall: `~/.wt-lanes/uninstall.sh`.
 
 ### Dependencies
 
-Required: `bash`, `git`, `tmux`, [Claude Code](https://claude.com/claude-code).
+Required: `bash`, `git`, `tmux`, [Pi](https://pi.dev).
 Optional: `jq`, `terminal-notifier` (macOS) / `notify-send` (linux).
 
 ## Quickstart
@@ -54,8 +53,7 @@ Optional: `jq`, `terminal-notifier` (macOS) / `notify-send` (linux).
 ```bash
 wt my-feature                          # spawn a lane on a fresh branch
 wt --branch existing-pr-branch         # spawn a lane on an existing branch
-wt --ralph epic-slug                   # autonomous Ralph loop for an epic
-wt --loop my-feature                   # outer loop wrapping `claude --print`
+wt --loop my-feature                   # deprecated alias for normal single-lane pickup
 wt --dag epic-slug                     # spawn ready-set lanes from a plan DAG
 wt-gc                                  # reap dead lanes
 ```
@@ -87,8 +85,8 @@ Red = needs attention, yellow = external dep, green = active or done.
 | Env | Default | Purpose |
 |---|---|---|
 | `WT_LAYOUT` | `window` | `pane`, `window`, or `session` — how the lane attaches to tmux. |
-| `WT_MODEL` | `opus` | Claude model the lane uses. |
-| `WT_CLAUDE` | `claude --dangerously-skip-permissions --model $WT_MODEL` | Full launch command override. |
+| `WT_PI_MODEL` | `openai-codex/gpt-5.5` | Pi model the lane uses. |
+| `WT_AGENT_CMD` | `pi --model $WT_PI_MODEL` | Full launch command override. |
 | `WT_NO_WATCH` | (unset) | Set to `1` to skip the auto-attached monitor pane. |
 | `WT_TMUX_SESSION` | `wt` | When run outside tmux, which session to target. |
 | `WT_TICKET_SYNC` | (unset) | Optional executable invoked with the slug on lane spawn. Pair with [tix](https://github.com/gitpancake/tix). |
@@ -107,13 +105,11 @@ Red = needs attention, yellow = external dep, green = active or done.
 wt-lanes/
 ├── bin/                  on-PATH executables
 │   ├── wt                lane spawner
-│   ├── wt-gc             dead-lane reaper
-│   └── ralph-bootstrap   copies Ralph into a worktree
+│   └── wt-gc             dead-lane reaper
 ├── scripts/              called by absolute path from wt + hooks
 │   ├── lane-watch.sh     per-lane monitor pane
 │   ├── lane-pause.sh     manual state writer
-│   ├── wt-loop.sh        outer loop driver
-│   ├── epic-parse.sh     _epic.md → prd.json
+│   ├── wt-loop.sh        deprecated legacy outer loop driver
 │   └── dag-parse.sh      DAG-mode plan parser
 ├── hooks/                Claude Code hooks
 │   ├── _state-write.sh   shared helper
@@ -122,8 +118,7 @@ wt-lanes/
 │   ├── agent-state-waiting.sh
 │   └── precheck-stop.sh
 ├── share/
-│   ├── agent-state-vocab.md   reason-code vocab
-│   └── ralph/                 Ralph orchestrator + prompt template
+│   └── agent-state-vocab.md   reason-code vocab
 ├── tmux/agent-board.sh        the status board
 ├── install.sh
 └── uninstall.sh
@@ -131,7 +126,7 @@ wt-lanes/
 
 ## Non-goals
 
-- Not a Claude Code prompt library. No slash commands, skills, or subagents
+- Not a Pi prompt library. No slash commands, skills, or subagents
   here — that belongs in a separate doctrine repo.
 - Not a ticket system. See `tix`.
 - Not a windows-native tool. macOS + Linux only.

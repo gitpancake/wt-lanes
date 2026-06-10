@@ -2,9 +2,8 @@
 # wt — spin up a worktree lane in one command.
 #
 # Usage:
-#   wt [--type <prefix>] <task-slug-or-ticket>     # single lane, one-shot claude (default)
-#   wt --loop [--type <prefix>] <task-slug>        # single lane, wt-loop.sh outer loop (fresh-context iterations to PR)
-#   wt --ralph [--type <prefix>] <EPIC>            # epic lane running the Ralph autonomous loop
+#   wt [--type <prefix>] <task-slug-or-ticket>     # single lane, one-shot pi (default)
+#   wt --loop [--type <prefix>] <task-slug>        # deprecated alias for normal single-lane pickup
 #   wt --branch <name> [--type ...] <slug>         # single lane on an existing branch (e.g. a PR head)
 #   wt --dag [--type <prefix>] <TICKET>            # parse plan DAG, spawn ready-set lanes (dormant)
 #   wt --resolve [--type <prefix>] <TICKET>        # re-spawn ready-set after slices merged (dormant)
@@ -19,8 +18,7 @@
 #   wt TEAM-1234                    # Linear id → brief whose frontmatter `linear:` matches
 #                                   (the brief must already exist locally — /scope it if not)
 #   wt raw-throwaway-slug           # slug with no brief → worktree only, no auto-kickoff
-#   wt --ralph billing-epic         # epic (folder with _epic.md) → lane runs epic-parse.sh
-#                                   then ralph.sh; /epic confirms the story order first
+#   wt billing-epic                 # epic folder slug → _epic.md brief
 #   wt auth-refactor-round-2        # trailing descriptor → 2nd lane on the same brief
 #   wt --type fix some-bug-slug     # branch fix/some-bug-slug
 #
@@ -41,8 +39,8 @@
 #   WT_TYPE=          branch type prefix (default: feature)
 #   WT_NO_FETCH=1     skip pre-spawn fetch + ff
 #   WT_LAYOUT=        pane|window|session (default: window)
-#   WT_CLAUDE='claude'  full bypass of model/permission flags
-#   WT_MODEL=sonnet   model override (default: opus)
+#   WT_AGENT_CMD='pi ...' full launch command override
+#   WT_PI_MODEL=openai-codex/gpt-5.5  Pi model override
 #   WT_DRY_RUN=1      DAG mode only — print what would spawn, don't actually
 #   WT_DAG=1          equivalent to --dag flag
 #
@@ -51,7 +49,7 @@
 #   - Branch <type>/<slug> off current HEAD (skipped if branch already exists)
 #   - Per-lane port stamped in .env.local.port (3100 + lane index)
 #   - .claude/agent-state seeded as IDLE (visible to agent-board)
-#   - In tmux: opens new window running claude, with optional initial prompt
+#   - In tmux: opens new window running pi, with optional initial prompt
 #   - Outside tmux: prints the path so you can cd in manually
 
 set -euo pipefail
@@ -61,13 +59,13 @@ set -euo pipefail
 mode="single"
 type_prefix="${WT_TYPE:-feature}"
 branch_override=""
+deprecated_loop=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dag)     mode="dag";     shift ;;
     --resolve) mode="resolve"; shift ;;
-    --ralph)   mode="ralph";   shift ;;
-    --loop)    mode="loop";    shift ;;
+    --loop)    deprecated_loop=1; shift ;;
     --print-brief) mode="print-brief"; shift ;;
     --type)
       [[ -z "${2:-}" ]] && { echo "wt: --type requires an argument" >&2; exit 1; }
@@ -94,7 +92,8 @@ type_prefix=$(printf '%s' "$type_prefix" | tr '[:upper:]' '[:lower:]' | sed -E '
 [[ -z "$type_prefix" ]] && { echo "wt: invalid --type prefix" >&2; exit 1; }
 
 raw=${1:-}
-[[ -z "$raw" ]] && { echo "usage: wt [--loop|--ralph|--dag|--resolve] [--type <prefix>] <task-slug-or-ticket>" >&2; exit 1; }
+[[ -z "$raw" ]] && { echo "usage: wt [--dag|--resolve] [--type <prefix>] <task-slug-or-ticket>" >&2; exit 1; }
+[[ "$deprecated_loop" == "1" ]] && echo "wt: --loop is deprecated; spawning a normal Pi lane" >&2
 
 # Derive a slug descriptor from the plan's first heading.
 #   '# TEAM-1234 — Add foo bar' → 'add-foo-bar'
@@ -334,8 +333,7 @@ spawn_lane() {
   printf '%s\n' "$s_label" > "$s_wt/.claude/tmux-window"
 
   # Record the cwd that spawned this lane so agent-board can nest spawned
-  # lanes under their parent (e.g. a Ralph lane shown as a child of the
-  # lane that invoked `wt --ralph`). WT_PARENT_CWD overrides for scripted use.
+  # lanes under their parent. WT_PARENT_CWD overrides for scripted use.
   printf '%s\n' "${WT_PARENT_CWD:-$PWD}" > "$s_wt/.claude/parent-cwd"
 
   # Optional: invoke a ticket-status sync on spawn so the ticket's `status:`
@@ -358,23 +356,14 @@ spawn_lane() {
 JSON
   fi
 
-  local claude_bin claude_cmd
-  claude_bin="${WT_CLAUDE:-claude --dangerously-skip-permissions --model ${WT_MODEL:-opus}}"
+  local agent_cmd lane_cmd
+  agent_cmd="${WT_AGENT_CMD:-pi --model ${WT_PI_MODEL:-openai-codex/gpt-5.5}}"
 
-  # @@WT_LOOP@@<brief> sentinel → drive the lane via wt-loop.sh instead of
-  # one-shot claude. wt-loop owns the iteration cadence so each fresh-context
-  # iteration stays under the turn-30 halt cliff.
-  if [[ "$s_initial" == @@WT_LOOP@@* ]]; then
-    local brief_path="${s_initial#@@WT_LOOP@@}"
-    claude_cmd="bash $HOME/.claude/scripts/wt-loop.sh $(printf '%q' "$s_wt") $(printf '%q' "$brief_path")"
-  else
-    claude_cmd="$claude_bin"
-    [[ -n "$s_initial" ]] && claude_cmd="$claude_bin $(printf '%q' "$s_initial")"
-  fi
+  lane_cmd="$agent_cmd"
+  [[ -n "$s_initial" ]] && lane_cmd="$agent_cmd $(printf '%q' "$s_initial")"
 
   # Every lane gets an auto-attached monitor pane — see CLAUDE.md "Lane
-  # observability". Policy: no lane runs unmonitored. lane-watch detects
-  # ralph lanes via scripts/ralph/ and renders the right view.
+  # observability". Policy: no lane runs unmonitored.
   # Opt out per-spawn with WT_NO_WATCH=1.
   local watch_cmd=""
   if [[ "${WT_NO_WATCH:-0}" != "1" ]]; then
@@ -384,21 +373,21 @@ JSON
   if [[ -n "${TMUX:-}" ]]; then
     case "$layout" in
       pane)
-        tmux split-window -h -c "$s_wt" "$claude_cmd"
+        tmux split-window -h -c "$s_wt" "$lane_cmd"
         tmux select-pane -T "$s_label" 2>/dev/null || true
         [[ -n "$watch_cmd" ]] && tmux split-window -v -c "$s_wt" "$watch_cmd"
         ;;
       window)
-        tmux new-window -n "$s_label" -c "$s_wt" "$claude_cmd"
+        tmux new-window -n "$s_label" -c "$s_wt" "$lane_cmd"
         if [[ -n "$watch_cmd" ]]; then
           tmux split-window -t "$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
-          # Focus the claude pane (left of the just-split watch pane).
+          # Focus the agent pane (left of the just-split watch pane).
           # Don't target "$s_label.0" — fails under `pane-base-index 1`.
           tmux select-pane -t "$s_label" -L 2>/dev/null || true
         fi
         ;;
       session)
-        tmux new-session -d -s "wt-$s_label" -c "$s_wt" "$claude_cmd"
+        tmux new-session -d -s "wt-$s_label" -c "$s_wt" "$lane_cmd"
         [[ -n "$watch_cmd" ]] && tmux split-window -t "wt-$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
         echo "wt: detached session 'wt-$s_label'. Attach: tmux attach -t wt-$s_label"
         ;;
@@ -416,16 +405,16 @@ JSON
     # any pane and loses scrollback.
     local target_sess="${WT_TMUX_SESSION:-wt}"
     if tmux has-session -t "$target_sess" 2>/dev/null; then
-      tmux new-window -t "$target_sess" -n "$s_label" -c "$s_wt" "$claude_cmd"
+      tmux new-window -t "$target_sess" -n "$s_label" -c "$s_wt" "$lane_cmd"
       echo "wt: spawned window '$s_label' in tmux session '$target_sess'."
     else
-      tmux new-session -d -s "$target_sess" -n "$s_label" -c "$s_wt" "$claude_cmd"
+      tmux new-session -d -s "$target_sess" -n "$s_label" -c "$s_wt" "$lane_cmd"
       echo "wt: started tmux session '$target_sess' with window '$s_label'."
     fi
     if [[ -n "$watch_cmd" ]]; then
       tmux split-window -t "$target_sess:$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
       tmux select-pane -t "$target_sess:$s_label" -L 2>/dev/null || true
-      echo "    Monitor pane attached (ralph-watch)."
+      echo "    Monitor pane attached (lane-watch)."
     fi
     echo "    Attach: tmux attach -t $target_sess"
     echo "  worktree: $s_wt"
@@ -436,36 +425,20 @@ JSON
     echo "  worktree: $s_wt"
     echo "  port:     $port"
     echo "  branch:   $s_branch"
-    [[ -n "$s_initial" ]] && echo "  kickoff:  $claude_cmd"
+    [[ -n "$s_initial" ]] && echo "  kickoff:  $lane_cmd"
   fi
 }
 
-# ---- single-lane + ralph modes --------------------------------------------
+# ---- single-lane mode ------------------------------------------------------
 
-if [[ "$mode" == "single" || "$mode" == "ralph" || "$mode" == "loop" ]]; then
+if [[ "$mode" == "single" ]]; then
   wt_path="$wt_dir/$slug"
   branch="${branch_override:-${type_prefix}/${slug}}"
 
-  review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. Never run \`gh pr comment\`, \`gh pr review --comment\`, or any \`gh\` command that writes to the PR conversation. Minor/NB findings: include in the final report only."
+  review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (note: reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that one is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
 
   initial=""
-  if [[ "$mode" == "loop" ]]; then
-    if [[ -z "$ticket_file" ]]; then
-      echo "wt: --loop needs a ticket brief. /scope '$raw' first." >&2
-      exit 1
-    fi
-    # wt-loop owns the iteration cadence; spawn_lane only puts a brief into the
-    # worktree and starts a shell that runs wt-loop.sh in --print mode.
-    initial="@@WT_LOOP@@${ticket_file}"
-  elif [[ "$mode" == "ralph" ]]; then
-    if [[ "$is_epic" != "1" ]]; then
-      echo "wt: --ralph needs an epic — a folder with an _epic.md at its root." >&2
-      echo "    '$raw' did not resolve to an epic. /scope it into an epic folder first," >&2
-      echo "    or run \`wt $raw\` to work it as a single ticket." >&2
-      exit 1
-    fi
-    initial="Autonomous mode — Ralph loop. Step 1: run \`ralph-bootstrap\` to set up scripts/ralph/ in this worktree. Step 2: project the epic's story list — \`~/.claude/scripts/epic-parse.sh ${ticket_file} > scripts/ralph/prd.json\`. Step 3: stamp the prd.json \`branchName\` with this lane's branch (\`git branch --show-current\`) via jq, and tune \`scripts/ralph/CLAUDE.md\` typecheck/test commands for this repo. Step 4: run \`./scripts/ralph/ralph.sh --tool claude\` — one story per fresh-context iteration, committing as it goes. The _epic.md is the source of truth; each story's NN-<child>.md carries its deep context. When all stories pass (<promise>COMPLETE</promise>), run /ship to open the PR. ${review_rule} Stop only on COMPLETE + PR open, or a genuine blocker (missing credential, repeated failure same root cause)."
-  elif [[ -n "$ticket_file" ]]; then
+  if [[ -n "$ticket_file" ]]; then
     initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass. Brief was sharpened in /scope; do not re-grill. Every behavior-changing slice: open the /tdd red-green-refactor loop — write the failing test first, then make it pass. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Auto-handoff fires at 120K context; do not wait, do not compact. After the final slice, run /ship to open the PR and trigger review. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed. Genuine blocker (ambiguity not in the brief, repeated test failure same root cause, missing credential) → stop and report. No inter-slice confirmation."
   elif [[ -f "$HOME/.claude/plans/${plan_slug}.md" ]]; then
     # No ticket brief, but a plan exists (e.g. /address-feedback writes
@@ -506,7 +479,7 @@ case "$parse_rc" in
     wt_path="$wt_dir/$slug"
     branch="${type_prefix}/${slug}"
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. Never run \`gh pr comment\`, \`gh pr review --comment\`, or any \`gh\` command that writes to the PR conversation. Minor/NB findings: include in the final report only."
+    review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (note: reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that one is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
     initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. After the final slice, run /ship. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed."
     spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
     exit 0

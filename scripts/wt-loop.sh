@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# wt-loop.sh — outer shell loop wrapping `claude` for single-ticket autonomous
-# lanes. Same shape as ralph.sh but driven by a ticket brief + auto-handoff
-# bridge instead of a prd.json story list.
+# wt-loop.sh — DEPRECATED legacy outer loop.
+#
+# wt now launches normal Pi lanes directly. This script is kept for existing
+# direct callers only; new flows should use `wt <slug>`.
 #
 # Iteration N:
 #   N=1   → kick off with the brief + slice plan instructions.
 #   N>1   → /resume the most recent handoff for this branch and keep going.
 #
-# Between iterations Claude exits naturally (Stop event); auto-handoff.sh has
+# Between iterations the agent exits naturally; auto-handoff.sh has
 # already written ~/.claude/handoffs/<UTC>-auto-<branch>.md, so iter N+1
 # starts with a fresh context that reads back that doc.
 #
@@ -23,7 +24,8 @@
 # Env:
 #   WT_LOOP_MAX_ITERS  (default 8)
 #   WT_LOOP_SLEEP      (default 2)   pause between iterations
-#   WT_CLAUDE          override claude command
+#   WT_AGENT_CMD       override agent command
+#   WT_PI_MODEL        Pi model override (default openai-codex/gpt-5.5)
 
 set -u
 
@@ -31,7 +33,9 @@ WT="${1:-$PWD}"
 BRIEF="${2:-}"
 MAX_ITERS="${WT_LOOP_MAX_ITERS:-8}"
 SLEEP_SECS="${WT_LOOP_SLEEP:-2}"
-CLAUDE_BIN="${WT_CLAUDE:-claude --dangerously-skip-permissions --model ${WT_MODEL:-opus}}"
+AGENT_CMD="${WT_AGENT_CMD:-pi --model ${WT_PI_MODEL:-openai-codex/gpt-5.5}}"
+
+echo "wt-loop: deprecated; prefer 'wt <slug>' for normal Pi lanes" >&2
 
 [[ ! -d "$WT" ]] && { echo "wt-loop: not a directory: $WT" >&2; exit 1; }
 cd "$WT"
@@ -82,11 +86,12 @@ for i in $(seq 1 "$MAX_ITERS"); do
 
   if (( i == 1 )); then
     prompt="Autonomous mode — wt-loop iteration 1.
-Brief at $BRIEF. Read it.
+Brief at $BRIEF. Read it. Brief was sharpened in /scope; do not re-grill.
 Plan slices inline — no separate scoping pass.
-Per slice: type-check + tests, commit per layer (schema → backend → frontend).
-The session will hard-halt at turn 20; before then, commit current progress.
-auto-handoff.sh will capture state. wt-loop will spawn iteration 2 to /resume.
+Every behavior-changing slice: open the /tdd red-green-refactor loop — write the failing test first, then make it pass.
+Per slice: type-check + tests (project's test command), commit per layer (schema → backend → frontend).
+Cross-layer or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline.
+Auto-handoff fires at 120K context; do not wait, do not compact. wt-loop spawns iteration 2 with /resume of the handoff doc.
 When all slices land, run /ship. ${review_rule}
 Stop only on: PR open + review-driven fixes pushed, or a genuine blocker
 (ambiguity not in brief, repeated test failure same root cause, missing credential)."
@@ -103,9 +108,15 @@ The session will hard-halt at turn 20; commit progress before then.
 When all slices land, /ship. ${review_rule}"
   fi
 
+  # Stream output live and archive it for forensics. Keep the command shape
+  # generic: Pi and Claude both support --print, but their JSON stream formats
+  # differ.
+  mkdir -p "$WT/.claude"
+  raw_log="$WT/.claude/lane-iter-${i}.log"
+
   set +e
-  echo "$prompt" | $CLAUDE_BIN --print 2>&1 | tee /dev/stderr
-  rc=$?
+  echo "$prompt" | $AGENT_CMD --print 2>&1 | tee "$raw_log"
+  rc=${PIPESTATUS[1]}
   set -e
 
   if pr_approved; then
@@ -122,7 +133,7 @@ When all slices land, /ship. ${review_rule}"
   fi
 
   if (( rc != 0 )); then
-    echo "wt-loop: claude exited rc=$rc — continuing to next iter."
+    echo "wt-loop: agent exited rc=$rc — continuing to next iter."
   fi
 
   sleep "$SLEEP_SECS"

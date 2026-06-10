@@ -38,10 +38,56 @@ import json,sys
 try:
   d=json.loads(sys.stdin.read())
   u=(d.get("message") or {}).get("usage") or {}
-  print((u.get("input_tokens") or 0)+(u.get("cache_read_input_tokens") or 0)+(u.get("cache_creation_input_tokens") or 0))
+  # Claude Code transcripts use Anthropic snake_case usage keys; Pi sessions
+  # store provider-normalized camel-ish keys on the same message object.
+  if any(k in u for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
+    print((u.get("input_tokens") or 0)+(u.get("cache_read_input_tokens") or 0)+(u.get("cache_creation_input_tokens") or 0))
+  else:
+    print((u.get("input") or 0)+(u.get("cacheRead") or 0)+(u.get("cacheWrite") or 0))
 except Exception:
   print("")
 ' 2>/dev/null
+}
+
+# Infer a compact state from a live Pi jsonl session. Pi does not currently
+# write ~/.claude/sessions-style status JSON, so use the transcript tail plus
+# jsonl freshness:
+# tool call => RUNNING:<tool>, tool result/user prompt => ACTIVE, recently
+# modified assistant message => ACTIVE (model is streaming/thinking), otherwise IDLE.
+pi_state_from_jsonl() {
+  local jsonl=$1
+  [[ -f "$jsonl" ]] || { printf 'IDLE'; return; }
+  python3 - "$jsonl" "${PI_ACTIVE_MTIME_SECS:-30}" <<'PY' 2>/dev/null || printf 'IDLE'
+import json, os, sys, time
+from collections import deque
+path = sys.argv[1]
+fresh_after = int(sys.argv[2])
+is_fresh = (time.time() - os.path.getmtime(path)) <= fresh_after
+last = None
+with open(path, errors="ignore") as f:
+    for line in deque(f, maxlen=80):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") == "message":
+            last = d.get("message") or {}
+if not last:
+    print("ACTIVE" if is_fresh else "IDLE")
+    raise SystemExit
+role = last.get("role")
+content = last.get("content") or []
+if role == "assistant":
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "toolCall":
+            print("RUNNING:" + str(part.get("name") or "tool"))
+            raise SystemExit
+    print("ACTIVE" if is_fresh else "IDLE")
+elif role in ("toolResult", "user"):
+    print("ACTIVE")
+else:
+    print("ACTIVE" if is_fresh else "IDLE")
+PY
 }
 
 
@@ -125,72 +171,6 @@ get_ctx_tokens() {
   [[ -n "$latest" ]] || { printf ''; return; }
   cache_file="$lane_dir/.claude/ctx-cache"
   _ctx_from_jsonl "$latest" "$cache_file"
-}
-
-# Ralph state for a lane. Prints "r<done>/<total> <story-id> <age>" if
-# scripts/ralph/ exists, empty otherwise.
-# - done/total: userStories with passes==true (ralph's completion marker).
-# - story-id: first unpassed story's id (what ralph is working on now).
-# - age: seconds since iterations/latest.log last grew (tool liveness).
-# All done → "r✓<total>". Cheap — one jq + one stat.
-# Returns 0 if every userStory in the lane's prd.json has passes==true.
-# Returns 1 if not done OR no Ralph dir/prd.json.
-ralph_is_done() {
-  local wt=$1
-  local prd="$wt/scripts/ralph/prd.json"
-  [[ -f "$prd" ]] || return 1
-  jq -e '
-    (.userStories // .stories // []) as $s
-    | ($s | length) > 0
-      and ($s | all(.passes == true))
-  ' "$prd" >/dev/null 2>&1
-}
-
-ralph_state_for() {
-  local wt=$1
-  local ralph_dir="$wt/scripts/ralph"
-  [[ -d "$ralph_dir" && -f "$ralph_dir/prd.json" ]] || return
-  local parts done total current
-  parts=$(jq -r '
-    (.userStories // .stories // []) as $s
-    | ($s | map(select(.passes == true)) | length) as $d
-    | ($s | length) as $t
-    | ($s | map(select(.passes != true)) | .[0] // {}) as $cur
-    | "\($d)\t\($t)\t\($cur.id // $cur.title // "")"
-  ' "$ralph_dir/prd.json" 2>/dev/null)
-  [[ -z "$parts" ]] && return
-  IFS=$'\t' read -r done total current <<<"$parts"
-  [[ -z "$total" || "$total" == "0" ]] && return
-
-  local marker
-  if [[ "$done" == "$total" ]]; then
-    # All stories passed → no marker. Caller treats absence as "done";
-    # phantom-hide + state-file IDLE handle the visual.
-    return
-  fi
-  marker="r$done/$total"
-  if [[ -n "$current" ]]; then
-    local trimmed=${current:0:12}
-    marker+=" $trimmed"
-  fi
-
-  # Liveness: take the freshest of latest.log (tool streaming) and
-  # agent-state (hook fires every tool call). Claude can spend minutes
-  # "thinking" without flushing tokens — agent-state catches that.
-  local activity_t=0 t
-  for f in "$ralph_dir/iterations/latest.log" "$wt/.claude/agent-state"; do
-    [[ -e "$f" ]] || continue
-    t=$(_stat_mtime "$f")
-    (( t > activity_t )) && activity_t=$t
-  done
-  if (( activity_t > 0 )); then
-    local lage=$((now - activity_t))
-    if   (( lage >= 3600 )); then marker+=" stale"
-    elif (( lage >= 60 ));   then marker+=" $((lage/60))m"
-    fi
-  fi
-
-  printf '%s' "$marker"
 }
 
 fmt_ctx() {
@@ -309,18 +289,7 @@ render_row() {
   [[ -z "$display" ]] && display=$(basename "$lane_dir")
   [[ -z "$display" ]] && display="$label"
 
-  # Append ralph progress marker so epic lanes are distinguishable at a glance.
-  local ralph
-  ralph=$(ralph_state_for "$lane_dir")
-  if [[ -n "$ralph" ]]; then
-    # Reserve room for the marker before truncating the label.
-    local max_label=$((28 - ${#ralph} - 1))
-    (( max_label < 1 )) && max_label=1
-    [[ ${#display} -gt $max_label ]] && display="${display:0:$((max_label - 3))}..."
-    display="$display $ralph"
-  else
-    [[ ${#display} -gt 28 ]] && display="${display:0:25}..."
-  fi
+  [[ ${#display} -gt 28 ]] && display="${display:0:25}..."
 
   local prio
   if (( is_stale )); then
@@ -373,11 +342,11 @@ tmux_window_for_pid() {
 }
 
 # Render a session-derived row. `bucket` is "lane", "lane-child", or "cockpit".
-# - lane: epic-style parent, append ralph marker, prefer tmux-window sentinel.
-# - lane-child: nested under parent w/ `└ ` prefix, no ralph marker.
+# - lane: worktree-backed parent, prefer tmux-window sentinel.
+# - lane-child: nested under parent w/ `└ ` prefix.
 # - cockpit: standalone, no nesting.
 render_session_row() {
-  local cwd=$1 state=$2 ctx_disp=${3:-} spid=${4:-} bucket=${5:-cockpit}
+  local cwd=$1 state=$2 ctx_disp=${3:-} spid=${4:-} bucket=${5:-cockpit} source=${6:-claude}
   local c
   case "$state" in
     ACTIVE*)  c=$green ;;
@@ -394,28 +363,16 @@ render_session_row() {
   fi
   [[ -z "$label" && -n "$spid" ]] && label=$(tmux_window_for_pid "$spid")
   [[ -z "$label" ]] && label=$(basename "$cwd")
+  [[ "$source" == "pi" ]] && label="π $label"
 
   local prefix=""
   local width=29
   case "$bucket" in
     lane)
-      local ralph
-      ralph=$(ralph_state_for "$cwd")
-      if [[ -n "$ralph" ]]; then
-        local max_label=$((28 - ${#ralph} - 1))
-        (( max_label < 1 )) && max_label=1
-        [[ ${#label} -gt $max_label ]] && label="${label:0:$((max_label - 3))}..."
-        label="$label $ralph"
-      else
-        [[ ${#label} -gt 28 ]] && label="${label:0:25}..."
-      fi
+      [[ ${#label} -gt 28 ]] && label="${label:0:25}..."
       ;;
     lane-child)
       prefix="└ "
-      # Child rows represent the ralph.sh-spawned claude in the lane cwd.
-      # Label by epic slug — that's the mental model (this lane is running
-      # `ralph:<epic>` in the background), not the pid.
-      label="ralph:$(ralph_epic_slug "$cwd")"
       [[ ${#label} -gt 26 ]] && label="${label:0:23}..."
       ;;
     *)
@@ -447,20 +404,6 @@ is_worktree_path() {
 state_short() {
   local s=$1
   [[ "$s" == *:* ]] && printf '%s' "${s#*:}" || printf '%s' "$s"
-}
-
-# Epic slug for a worktree's Ralph loop (used as child-row label).
-# Reads prd.json branchName, strips "ralph/" prefix. Falls back to cwd basename.
-ralph_epic_slug() {
-  local wt=$1
-  local prd="$wt/scripts/ralph/prd.json"
-  if [[ -f "$prd" ]]; then
-    local bn
-    # Branch basename — strips any "feature/", "ralph/", etc. prefix in one step.
-    bn=$(jq -r '.branchName // empty' "$prd" 2>/dev/null | sed 's|^.*/||')
-    [[ -n "$bn" ]] && { printf '%s' "$bn"; return; }
-  fi
-  basename "$wt"
 }
 
 print_section_header() {
@@ -499,21 +442,71 @@ add_lane_row() {
   lane_rows+="${group_prio}"$'\t'"${cwd}"$'\t'"${sub}"$'\t'"${row_rest}"$'\n'
 }
 
-# --- Pre-pass: collect every live Claude session, sorted by cwd then spid. ---
-sessions_raw=""
-for sess_json in "$HOME"/.claude/sessions/*.json; do
-  [[ -f "$sess_json" ]] || continue
-  spid=$(grep -o '"pid":[0-9]*' "$sess_json" | head -1 | grep -o '[0-9]*')
-  [[ -n "$spid" ]] || continue
-  kill -0 "$spid" 2>/dev/null || continue
-  scwd=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('cwd',''))" "$sess_json" 2>/dev/null)
-  [[ -n "$scwd" ]] || continue
-  sessions_raw+=$(printf '%s\t%s\t%s\n' "$scwd" "$spid" "$sess_json")$'\n'
-done
+# --- Pre-pass: collect every live Claude + Pi session, sorted by cwd then spid. ---
+# Row schema: cwd<TAB>pid<TAB>session-file<TAB>source (claude|pi)
+sessions_raw=$(python3 <<'PY' 2>/dev/null
+import glob, json, os, signal, subprocess
+from pathlib import Path
+home = Path.home()
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+# Claude Code exposes a small live-session registry with pid/cwd/status.
+for path in glob.glob(str(home / ".claude" / "sessions" / "*.json")):
+    try:
+        data = json.load(open(path))
+        pid = int(data.get("pid") or 0)
+        cwd = data.get("cwd") or ""
+    except Exception:
+        continue
+    if pid and cwd and alive(pid):
+        print(f"{cwd}\t{pid}\t{path}\tclaude")
+
+# Pi currently only persists jsonl transcripts. Pair live `pi` processes with
+# their cwd, then attach the newest jsonl whose session header has that cwd.
+pi_sessions = {}
+for path in glob.glob(str(home / ".pi" / "agent" / "sessions" / "*" / "*.jsonl")):
+    try:
+        with open(path, errors="ignore") as f:
+            first = json.loads(f.readline() or "{}")
+        cwd = first.get("cwd") or ""
+        if first.get("type") != "session" or not cwd:
+            continue
+        mtime = os.path.getmtime(path)
+    except Exception:
+        continue
+    old = pi_sessions.get(cwd)
+    if not old or mtime > old[0]:
+        pi_sessions[cwd] = (mtime, path)
+
+try:
+    ps = subprocess.check_output(["ps", "-axo", "pid=,comm="], text=True)
+except Exception:
+    ps = ""
+for line in ps.splitlines():
+    parts = line.strip().split(None, 1)
+    if len(parts) != 2 or parts[1] != "pi":
+        continue
+    try:
+        pid = int(parts[0])
+        lsof = subprocess.check_output(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], text=True, stderr=subprocess.DEVNULL)
+        cwd = next((l[1:] for l in lsof.splitlines() if l.startswith("n")), "")
+    except Exception:
+        continue
+    sess = pi_sessions.get(cwd)
+    if cwd and sess and alive(pid):
+        print(f"{cwd}\t{pid}\t{sess[1]}\tpi")
+PY
+)
 sessions_sorted=$(printf '%s' "$sessions_raw" | grep -v '^$' | sort -t$'\t' -k1,1 -k2,2n)
 
 live_cwds=$'\n'
-while IFS=$'\t' read -r scwd _ _; do
+while IFS=$'\t' read -r scwd _ _ _; do
   [[ -n "$scwd" ]] && live_cwds+="$scwd"$'\n'
 done <<< "$sessions_sorted"
 cwd_alive() { [[ "$live_cwds" == *$'\n'"$1"$'\n'* ]]; }
@@ -528,7 +521,7 @@ for root in "${ROOTS[@]}"; do
     [[ -d "$wt" ]] && add_lane_cwd "${wt%/}"
   done
 done
-while IFS=$'\t' read -r scwd _ _; do
+while IFS=$'\t' read -r scwd _ _ _; do
   [[ -n "$scwd" ]] && is_worktree_path "$scwd" && add_lane_cwd "$scwd"
 done <<< "$sessions_sorted"
 is_lane_cwd() { [[ "$lane_cwds" == *$'\n'"$1"$'\n'* ]]; }
@@ -550,7 +543,9 @@ parent_lane_of() {
 render_lane_for() {
   local lcwd=$1 bucket=$2
   local state_file="$lcwd/.claude/agent-state"
-  if [[ "$bucket" == "lane" && -f "$state_file" ]]; then
+  local has_live_pi=""
+  has_live_pi=$(printf '%s' "$sessions_sorted" | awk -F'\t' -v c="$lcwd" '$1==c && $4=="pi"{print 1; exit}')
+  if [[ "$bucket" == "lane" && -f "$state_file" && -z "$has_live_pi" ]]; then
     local name repo
     name=$(basename "$lcwd")
     repo=$(basename "$(dirname "$(dirname "$(dirname "$lcwd")")")")
@@ -559,41 +554,60 @@ render_lane_for() {
   fi
 
   # Session-derived path. Primary pid: agent-pid (if alive) else oldest spid.
-  local pid sess_json
-  pid=$(cat "$lcwd/.claude/agent-pid" 2>/dev/null)
+  local pid sess_json source
+  if [[ -n "$has_live_pi" ]]; then
+    # Prefer the Pi process over a stale/alive Claude agent-pid sentinel for the
+    # same lane; otherwise the old .claude/agent-state masks Pi activity.
+    pid=$(printf '%s' "$sessions_sorted" | awk -F'\t' -v c="$lcwd" '$1==c && $4=="pi"{print $2; exit}')
+  else
+    pid=$(cat "$lcwd/.claude/agent-pid" 2>/dev/null)
+  fi
   if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
     pid=$(printf '%s' "$sessions_sorted" | awk -F'\t' -v c="$lcwd" '$1==c{print $2; exit}')
   fi
   [[ -z "$pid" ]] && return
   sess_json=$(printf '%s' "$sessions_sorted" | awk -F'\t' -v p="$pid" '$2==p{print $3; exit}')
+  source=$(printf '%s' "$sessions_sorted" | awk -F'\t' -v p="$pid" '$2==p{print $4; exit}')
+  [[ -z "$source" ]] && source=claude
 
   local sstate=""
-  [[ -f "$lcwd/.claude/sessions/$pid" ]] && sstate=$(cat "$lcwd/.claude/sessions/$pid" 2>/dev/null)
-  if [[ -z "$sstate" && -f "$state_file" ]]; then
-    sstate=$(tail -n1 "$state_file" 2>/dev/null)
+  if [[ "$source" != "pi" ]]; then
+    [[ -f "$lcwd/.claude/sessions/$pid" ]] && sstate=$(cat "$lcwd/.claude/sessions/$pid" 2>/dev/null)
+    if [[ -z "$sstate" && -f "$state_file" ]]; then
+      sstate=$(tail -n1 "$state_file" 2>/dev/null)
+    fi
   fi
   if [[ -z "$sstate" && -f "$sess_json" ]]; then
-    local sstatus
-    sstatus=$(grep -o '"status":"[^"]*"' "$sess_json" | head -1 | sed 's/"status":"//;s/"//')
-    [[ "$sstatus" == "busy" ]] && sstate="ACTIVE" || sstate="IDLE"
+    if [[ "$source" == "pi" ]]; then
+      sstate=$(pi_state_from_jsonl "$sess_json")
+    else
+      local sstatus
+      sstatus=$(grep -o '"status":"[^"]*"' "$sess_json" | head -1 | sed 's/"status":"//;s/"//')
+      [[ "$sstatus" == "busy" ]] && sstate="ACTIVE" || sstate="IDLE"
+    fi
   fi
   [[ -z "$sstate" ]] && sstate="IDLE"
 
   local ctx_disp=""
   if [[ -f "$sess_json" ]]; then
     local sid enc jsonl_path cache_file
-    sid=$(grep -o '"sessionId":"[^"]*"' "$sess_json" | head -1 | sed 's/"sessionId":"//;s/"//')
-    if [[ -n "$sid" ]]; then
-      enc=${lcwd//\//-}; enc=${enc//./-}
-      jsonl_path="$HOME/.claude/projects/$enc/$sid.jsonl"
-      if [[ -f "$jsonl_path" ]]; then
-        cache_file="$HOME/.claude/projects/$enc/.ctx-cache-$sid"
-        ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$jsonl_path" "$cache_file")")
+    if [[ "$source" == "pi" ]]; then
+      cache_file="$sess_json.ctx-cache"
+      ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$sess_json" "$cache_file")")
+    else
+      sid=$(grep -o '"sessionId":"[^"]*"' "$sess_json" | head -1 | sed 's/"sessionId":"//;s/"//')
+      if [[ -n "$sid" ]]; then
+        enc=${lcwd//\//-}; enc=${enc//./-}
+        jsonl_path="$HOME/.claude/projects/$enc/$sid.jsonl"
+        if [[ -f "$jsonl_path" ]]; then
+          cache_file="$HOME/.claude/projects/$enc/.ctx-cache-$sid"
+          ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$jsonl_path" "$cache_file")")
+        fi
       fi
     fi
   fi
 
-  render_session_row "$lcwd" "$sstate" "$ctx_disp" "$pid" "$bucket"
+  render_session_row "$lcwd" "$sstate" "$ctx_disp" "$pid" "$bucket" "$source"
 }
 
 # --- Phase 1: parent lanes (no parent-cwd sentinel pointing to another lane). ---
@@ -602,7 +616,6 @@ lane_count=0
 while IFS= read -r lcwd; do
   [[ -z "$lcwd" ]] && continue
   [[ -n "$(parent_lane_of "$lcwd")" ]] && continue
-  if ralph_is_done "$lcwd" && ! cwd_alive "$lcwd"; then continue; fi
   row=$(render_lane_for "$lcwd" lane)
   [[ -z "$row" ]] && continue
   note_covered "$lcwd"
@@ -615,7 +628,6 @@ while IFS= read -r lcwd; do
   [[ -z "$lcwd" ]] && continue
   parent=$(parent_lane_of "$lcwd")
   [[ -z "$parent" ]] && continue
-  if ralph_is_done "$lcwd" && ! cwd_alive "$lcwd"; then continue; fi
   row=$(render_lane_for "$lcwd" lane-child)
   [[ -z "$row" ]] && continue
   note_covered "$lcwd"
@@ -629,30 +641,40 @@ done <<< "${lane_cwds#$'\n'}"
 # --- Phase 3: cockpit — live sessions whose cwd is not a lane. ---
 cockpit_rows=""
 cockpit_count=0
-while IFS=$'\t' read -r scwd spid sess_json; do
+while IFS=$'\t' read -r scwd spid sess_json source; do
   [[ -n "$scwd" && -n "$spid" && -f "$sess_json" ]] || continue
+  [[ -z "$source" ]] && source=claude
   is_lane_cwd "$scwd" && continue
 
   sstate=""
   [[ -f "$scwd/.claude/sessions/$spid" ]] && sstate=$(cat "$scwd/.claude/sessions/$spid" 2>/dev/null)
   if [[ -z "$sstate" ]]; then
-    sstatus=$(grep -o '"status":"[^"]*"' "$sess_json" | head -1 | sed 's/"status":"//;s/"//')
-    [[ "$sstatus" == "busy" ]] && sstate="ACTIVE" || sstate="IDLE"
+    if [[ "$source" == "pi" ]]; then
+      sstate=$(pi_state_from_jsonl "$sess_json")
+    else
+      sstatus=$(grep -o '"status":"[^"]*"' "$sess_json" | head -1 | sed 's/"status":"//;s/"//')
+      [[ "$sstatus" == "busy" ]] && sstate="ACTIVE" || sstate="IDLE"
+    fi
   fi
 
   ctx_disp=""
-  sid=$(grep -o '"sessionId":"[^"]*"' "$sess_json" | head -1 | sed 's/"sessionId":"//;s/"//')
-  if [[ -n "$sid" ]]; then
-    enc=${scwd//\//-}; enc=${enc//./-}
-    jsonl_path="$HOME/.claude/projects/$enc/$sid.jsonl"
-    if [[ -f "$jsonl_path" ]]; then
-      cache_file="$HOME/.claude/projects/$enc/.ctx-cache-$sid"
-      ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$jsonl_path" "$cache_file")")
+  if [[ "$source" == "pi" ]]; then
+    cache_file="$sess_json.ctx-cache"
+    ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$sess_json" "$cache_file")")
+  else
+    sid=$(grep -o '"sessionId":"[^"]*"' "$sess_json" | head -1 | sed 's/"sessionId":"//;s/"//')
+    if [[ -n "$sid" ]]; then
+      enc=${scwd//\//-}; enc=${enc//./-}
+      jsonl_path="$HOME/.claude/projects/$enc/$sid.jsonl"
+      if [[ -f "$jsonl_path" ]]; then
+        cache_file="$HOME/.claude/projects/$enc/.ctx-cache-$sid"
+        ctx_disp=$(fmt_ctx "$(_ctx_from_jsonl "$jsonl_path" "$cache_file")")
+      fi
     fi
   fi
 
   cockpit_count=$((cockpit_count + 1))
-  cockpit_rows+=$(render_session_row "$scwd" "$sstate" "$ctx_disp" "$spid" cockpit)$'\n'
+  cockpit_rows+=$(render_session_row "$scwd" "$sstate" "$ctx_disp" "$spid" cockpit "$source")$'\n'
 done <<< "$sessions_sorted"
 
 if (( lane_count == 0 && cockpit_count == 0 )); then

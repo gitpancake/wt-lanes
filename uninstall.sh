@@ -20,7 +20,6 @@ unlink_if_ours() {
 for f in "$REPO_DIR"/bin/*;     do [[ -e "$f" ]] && unlink_if_ours "$HOME/.local/bin/$(basename "$f")";    done
 for f in "$REPO_DIR"/scripts/*; do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claude/scripts/$(basename "$f")"; done
 for f in "$REPO_DIR"/hooks/*;   do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claude/hooks/$(basename "$f")";   done
-unlink_if_ours "$HOME/.claude/ralph"
 unlink_if_ours "$HOME/.claude/agent-state-vocab.md"
 unlink_if_ours "$HOME/.tmux/agent-board.sh"
 

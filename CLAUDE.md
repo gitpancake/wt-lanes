@@ -38,8 +38,6 @@ Three roles in the system:
   otherwise expects `--branch`. No hard dep on tix.
 - **Slash commands / subagents / skills:** none. Those belong in a separate
   doctrine repo.
-- **Ralph:** included. `bin/ralph-bootstrap` reads from `$WTLANES_RALPH`
-  (default `~/.claude/ralph`).
 - **`WT_TICKET_SYNC`:** the one optional callback. Lets users plug in
   `tix-sync` or any other slug-aware status reconciler.
 
@@ -62,7 +60,6 @@ authoritative source. The pid → window walk is a fallback.
 | `bin/*` | `~/.local/bin/` |
 | `scripts/*` | `~/.claude/scripts/` |
 | `hooks/*` | `~/.claude/hooks/` |
-| `share/ralph` | `~/.claude/ralph` |
 | `share/agent-state-vocab.md` | `~/.claude/agent-state-vocab.md` |
 | `tmux/agent-board.sh` | `~/.tmux/agent-board.sh` |
 
