@@ -242,6 +242,8 @@ def priority_for(raw, klass):
         return {"red": 0, "yellow": 2, "dim": 5}.get(klass, 0)
     if raw.startswith("FAILED"):
         return 1
+    if raw.startswith("HANDOFF"):
+        return 2
     if raw.startswith("RUNNING"):
         return 3
     if raw.startswith("ACTIVE"):
@@ -428,6 +430,11 @@ def lane_row_from_state_file(state_file, lane_dir):
         klass = klass or "red"
     elif raw.startswith("WAITING:") or raw == "WAITING":
         klass, state = "red", "W:input"
+    elif raw.startswith("HANDOFF"):
+        # Transient while lane-run respawns; persistent only when the respawn
+        # cap is hit (the runner then re-tags via lane-pause). Doc path stays
+        # in the state file.
+        state = "HANDOFF"
 
     pid_file = os.path.join(lane_dir, ".claude", "agent-pid")
     is_stale = False

@@ -6,7 +6,10 @@
 Three roles in the system:
 
 1. **Producer** — `bin/wt` spawns a worktree + branch + tmux pane + Claude
-   session. Seeds `<wt>/.claude/agent-state` to `IDLE` and writes
+   session, launched through `scripts/lane-run.sh`: the runner relaunches the
+   agent with a /resume prompt when it exits in `HANDOFF:<doc>` state (capped
+   at `WT_MAX_RESPAWNS`, default 3; cap hit → re-tag `WAITING:input` via
+   lane-pause). Seeds `<wt>/.claude/agent-state` to `IDLE` and writes
    `<wt>/.claude/tmux-window` for the board to label the lane.
 2. **State machine** — hooks (`hooks/agent-state-*.sh`, `hooks/precheck-stop.sh`)
    are the *only* writers of `<wt>/.claude/agent-state`. They run inside
@@ -24,9 +27,10 @@ Three roles in the system:
 1. **The state file is the contract.** Every reader assumes it follows the
    vocab in `share/agent-state-vocab.md`. New states require updates in
    vocab + every reader.
-2. **Hooks are the only writers.** `lane-pause.sh` is the one exception
-   (manual writer for WAITING states) and goes through the same
-   `_state-write.sh` helper.
+2. **Hooks are the only writers.** Exceptions are the lane's deliberate
+   final tool calls — `lane-pause.sh` (WAITING), `lane-done.sh` (DONE),
+   `lane-handoff.sh` (HANDOFF:<doc>) — and the Stop-chain hooks preserve
+   those states instead of clobbering them to IDLE/precheck verdicts.
 3. **Bins resolve scripts/hooks via absolute paths** to `~/.claude/scripts`
    and `~/.claude/hooks`. install.sh symlinks files there. Do not
    `dirname $0`-relative — bins are symlinked onto PATH and would lose

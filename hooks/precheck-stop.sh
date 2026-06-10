@@ -37,6 +37,14 @@ state_file="$dir/.claude/agent-state"
 log="$dir/.claude/precheck.log"
 pid_file="$dir/.claude/precheck.pid"
 
+# Terminal/tagged states win: a lane that just declared DONE (lane-done.sh),
+# HANDOFF:<doc> (lane-handoff.sh — the runner reads it to respawn), or a
+# tagged pause (lane-pause.sh) must not have its exit reason replaced by a
+# precheck verdict.
+case "$(tail -n1 "$state_file" 2>/dev/null || true)" in
+  DONE|HANDOFF:*|WAITING:*:*) exit 0 ;;
+esac
+
 # Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
 put_state() {
   local tmp="$state_file.tmp.precheck.$$"
