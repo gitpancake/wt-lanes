@@ -9,6 +9,12 @@
 # close as before. Without this, the ctx-cap doctrine's "next lane session
 # resumes" was fiction — a lane that handed off mid-brief just died silently.
 #
+# Exit trigger: an interactive claude session never exits when its turn ends
+# (it idles at the REPL prompt), so lane-handoff.sh kills the session after a
+# grace period — that's what makes this loop's eval return on the handoff
+# path. DONE/WAITING lanes keep their session alive; the window stays
+# interactive until the human closes it.
+#
 # Usage: lane-run.sh <worktree> <agent_cmd> <initial_prompt> [resume_template]
 #   agent_cmd:       shell string (may carry args, e.g. WT_AGENT_CMD='pi ...')
 #   resume_template: prompt for respawned sessions; {DOC} {N} {MAX} are

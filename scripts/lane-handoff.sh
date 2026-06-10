@@ -6,6 +6,21 @@
 # /resumes the doc — this script is what makes "the next session resumes"
 # true instead of aspirational.
 #
+# An interactive claude session never exits on its own — after the final
+# message it sits at the REPL prompt, so lane-run.sh would block in its eval
+# forever and the HANDOFF state would never be read (this stranded the first
+# real handoff, 2026-06-10). So this script also schedules the session's
+# death: a detached watcher waits WT_HANDOFF_KILL_GRACE seconds (default 20,
+# enough for the agent's final message), re-asserts the HANDOFF state in case
+# a stray hook overwrote it, then TERMs (and if needed KILLs) the lane's
+# claude. The runner's eval returns, reads HANDOFF, respawns.
+#
+# Kill target is the pid in <lane>/.claude/agent-pid (refreshed by every
+# state hook) — NEVER a parent-process walk: a manual cockpit invocation
+# walks to the COCKPIT's claude and kills the wrong session (it did,
+# 2026-06-10). Cockpit pids never land in agent-pid, so this can only ever
+# hit the lane's own session.
+#
 # Usage: lane-handoff.sh <handoff-doc-path>
 # macOS bash 3.2 compatible.
 
@@ -32,9 +47,48 @@ fi
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 mkdir -p "$dir/.claude"
+state_file="$dir/.claude/agent-state"
 # Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
-tmp="$dir/.claude/agent-state.tmp.$$"
-printf 'HANDOFF:%s\n' "$doc" > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
+tmp="$state_file.tmp.$$"
+printf 'HANDOFF:%s\n' "$doc" > "$tmp" && mv -f "$tmp" "$state_file"
 
-printf 'lane-handoff: state set, runner will respawn with %s\n' "$doc"
+case "$dir" in
+  */.claude/worktrees/*) ;;
+  *)
+    printf 'lane-handoff: state set (not a lane worktree, no session to recycle): %s\n' "$doc"
+    exit 0 ;;
+esac
+
+lane_pid=$(tr -d ' \n' < "$dir/.claude/agent-pid" 2>/dev/null || true)
+if [[ -z "$lane_pid" || "$lane_pid" == *[!0-9]* ]]; then
+  printf 'lane-handoff: state set, but no agent-pid recorded — kill the lane session yourself so lane-run.sh can respawn with %s\n' "$doc"
+  exit 0
+fi
+case "$(ps -o comm= -p "$lane_pid" 2>/dev/null)" in
+  *claude*) ;;
+  *)
+    printf 'lane-handoff: state set, but agent-pid %s is not a live claude — kill the lane session yourself so lane-run.sh can respawn with %s\n' "$lane_pid" "$doc"
+    exit 0 ;;
+esac
+
+grace=${WT_HANDOFF_KILL_GRACE:-20}
+(
+  sleep "$grace"
+  # The lane may have kept working past the contract and even declared DONE.
+  # DONE wins — never kill a finished lane into a respawn. Anything else:
+  # re-assert HANDOFF so the runner respawns rather than exiting on a stray
+  # ACTIVE/IDLE written by a later hook.
+  [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "DONE" ]] && exit 0
+  retmp="$state_file.tmp.handoff.$$"
+  printf 'HANDOFF:%s\n' "$doc" > "$retmp" && mv -f "$retmp" "$state_file"
+  kill -TERM "$lane_pid" 2>/dev/null
+  for _ in 1 2 3 4 5; do
+    kill -0 "$lane_pid" 2>/dev/null || exit 0
+    sleep 2
+  done
+  kill -KILL "$lane_pid" 2>/dev/null
+) </dev/null >/dev/null 2>&1 &
+disown 2>/dev/null || true
+
+printf 'lane-handoff: state set; lane session %s terminates in ~%ss, runner respawns with %s\n' "$lane_pid" "$grace" "$doc"
 exit 0

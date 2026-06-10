@@ -9,7 +9,11 @@ Three roles in the system:
    session, launched through `scripts/lane-run.sh`: the runner relaunches the
    agent with a /resume prompt when it exits in `HANDOFF:<doc>` state (capped
    at `WT_MAX_RESPAWNS`, default 3; cap hit → re-tag `WAITING:input` via
-   lane-pause). Seeds `<wt>/.claude/agent-state` to `IDLE` and writes
+   lane-pause). An interactive claude never exits on its own, so
+   `lane-handoff.sh` TERMs the lane's claude (pid from `agent-pid`, NEVER an
+   ancestor walk — that kills the cockpit on manual runs) after a grace
+   period; that exit is what unblocks the runner. Seeds
+   `<wt>/.claude/agent-state` to `IDLE` and writes
    `<wt>/.claude/tmux-window` for the board to label the lane.
 2. **State machine** — hooks (`hooks/agent-state-*.sh`, `hooks/precheck-stop.sh`)
    are the *only* writers of `<wt>/.claude/agent-state`. They run inside

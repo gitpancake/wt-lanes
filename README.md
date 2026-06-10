@@ -75,7 +75,7 @@ Every lane writes to `<worktree>/.claude/agent-state` via the registered hooks:
 | `ACTIVE:<tool>` | `agent-state-active` (PreToolUse) | Lane is mid-tool-use. The tool name lands in the suffix. |
 | `WAITING:<code>:<detail>` | `agent-state-waiting` (Notification) and `lane-pause <code> <detail>` (manual) | Lane needs attention. See `share/agent-state-vocab.md` for the code vocabulary. |
 | `RUNNING:precheck` / `DONE` / `FAILED:<step>` | `precheck-stop` | Lane just stopped — the precheck contract is running (typecheck, tests, etc.). |
-| `HANDOFF:<doc-path>` | `lane-handoff.sh` (lane's final tool call after `/handoff`) | Context forced a session swap mid-brief. `lane-run.sh` respawns a fresh session that `/resume`s the doc; persists only if the respawn cap is hit. |
+| `HANDOFF:<doc-path>` | `lane-handoff.sh` (lane's final tool call after `/handoff`) | Context forced a session swap mid-brief. The script also TERMs the lane's claude (pid from `agent-pid`, ~20s grace — an interactive session never exits by itself) so `lane-run.sh` unblocks, reads the state, and respawns a fresh session that `/resume`s the doc; persists only if the respawn cap is hit. |
 
 The board reads each lane's state file every 2 seconds and renders accordingly.
 Red = needs attention, yellow = external dep, green = active or done.
