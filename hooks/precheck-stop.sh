@@ -23,6 +23,11 @@ set -u
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 [[ -z "$dir" ]] && exit 0
 
+# Lane-only: DONE/FAILED are lane state-machine vocab, and the board's
+# cockpit rows never read agent-state — running prechecks for cockpit
+# sessions burned CPU to write repo litter nothing rendered.
+[[ "$dir" == */.claude/worktrees/* ]] || exit 0
+
 script="$dir/.claude/precheck.sh"
 [[ -x "$script" ]] || exit 0
 
@@ -32,6 +37,12 @@ state_file="$dir/.claude/agent-state"
 log="$dir/.claude/precheck.log"
 pid_file="$dir/.claude/precheck.pid"
 
+# Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
+put_state() {
+  local tmp="$state_file.tmp.precheck.$$"
+  printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$state_file"
+}
+
 # Kill any previously running precheck for this project.
 if [[ -f "$pid_file" ]]; then
   prev=$(cat "$pid_file" 2>/dev/null || true)
@@ -40,7 +51,7 @@ if [[ -f "$pid_file" ]]; then
   fi
 fi
 
-echo "RUNNING:precheck" > "$state_file"
+put_state "RUNNING:precheck"
 
 # Fully detach the worker. Stop hook returns immediately; no blocking.
 (
@@ -49,7 +60,7 @@ echo "RUNNING:precheck" > "$state_file"
     # has written the state since we claimed it — never move the machine
     # backwards from a fresher state.
     [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "RUNNING:precheck" ]] || return 0
-    echo "$1" > "$state_file"
+    put_state "$1"
   }
   if "$script" >"$log" 2>&1; then
     finish "DONE"

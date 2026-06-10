@@ -11,6 +11,9 @@ Three roles in the system:
 2. **State machine** — hooks (`hooks/agent-state-*.sh`, `hooks/precheck-stop.sh`)
    are the *only* writers of `<wt>/.claude/agent-state`. They run inside
    Claude Code, registered in the user's `~/.claude/settings.json`.
+   `_state-write.sh` routes by cwd: lanes get the in-worktree files; cockpit
+   sessions write only `~/.claude/wt-sessions/<pid>` so ordinary repos never
+   accumulate `.claude/` state churn.
 3. **Consumer** — `tmux/agent-board.py` (via the `agent-board.sh` launcher)
    and `scripts/lane-watch.sh` read the state file and render. One sanctioned
    write: the board's stale-reap resets ACTIVE/WAITING/RUNNING to IDLE when

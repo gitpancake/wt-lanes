@@ -376,7 +376,13 @@ def parent_lane_of(lcwd, lane_set):
 
 
 def session_pid_state(cwd, pid):
-    """Granular per-pid state written by the wt-lanes hooks."""
+    """Granular per-pid state written by the wt-lanes hooks. Cockpit sessions
+    write to the central ~/.claude/wt-sessions/<pid>; lanes write
+    <lane>/.claude/sessions/<pid>. Legacy in-repo cockpit files are read as a
+    fallback during transition."""
+    state = read_first_line(str(HOME / ".claude" / "wt-sessions" / str(pid))).strip()
+    if state:
+        return state
     return read_first_line(os.path.join(cwd, ".claude", "sessions", str(pid))).strip()
 
 

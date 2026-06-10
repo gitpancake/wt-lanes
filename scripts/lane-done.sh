@@ -12,7 +12,9 @@ set -u
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 mkdir -p "$dir/.claude"
-printf 'DONE\n' > "$dir/.claude/agent-state"
+# Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
+tmp="$dir/.claude/agent-state.tmp.$$"
+printf 'DONE\n' > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
 
 [[ -z "${TMUX:-}" ]] && exit 0
 
