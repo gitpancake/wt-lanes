@@ -88,10 +88,10 @@ for i in $(seq 1 "$MAX_ITERS"); do
     prompt="Autonomous mode — wt-loop iteration 1.
 Brief at $BRIEF. Read it. Brief was sharpened in /scope; do not re-grill.
 Plan slices inline — no separate scoping pass.
-Every behavior-changing slice: open the /tdd red-green-refactor loop — write the failing test first, then make it pass.
+Every behavior-changing slice: invoke the tdd skill via the Skill tool (red-green-refactor) — write the failing test first, then make it pass.
 Per slice: type-check + tests (project's test command), commit per layer (schema → backend → frontend).
-Cross-layer or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline.
-Auto-handoff fires at 120K context; do not wait, do not compact. wt-loop spawns iteration 2 with /resume of the handoff doc.
+Cross-layer or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline.
+At the 130K ctx nudge (or ~120K regardless): commit, run /handoff, exit — wt-loop spawns iteration 2 with /resume of the handoff doc. Do not compact.
 When all slices land, run /ship. ${review_rule}
 Stop only on: PR open + review-driven fixes pushed, or a genuine blocker
 (ambiguity not in brief, repeated test failure same root cause, missing credential)."
@@ -104,7 +104,7 @@ Stop only on: PR open + review-driven fixes pushed, or a genuine blocker
     prompt="Autonomous mode — wt-loop iteration $i. /resume $handoff
 Continue from where the prior iteration left off — the handoff doc carries
 state, active files, and next-steps. Same slice protocol + commit cadence.
-The session will hard-halt at turn 20; commit progress before then.
+At the 130K ctx nudge: commit, run /handoff, exit — wt-loop spawns the next iteration.
 When all slices land, /ship. ${review_rule}"
   fi
 

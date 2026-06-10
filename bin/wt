@@ -443,7 +443,7 @@ review_rule="The lane OWNS its review feedback loop end-to-end. After /ship post
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-pi}" == *claude* ]]; then
-  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Past ~120K context: commit, run /handoff, and stop — the next lane session /resumes the doc. Do not compact."
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~120K context (a non-blocking nudge fires at 130K/160K/190K): wrap the in-flight slice, commit, run /handoff, and stop — the next lane session /resumes the doc and continues the brief, including a pending review loop. Do not compact."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
 fi
@@ -456,7 +456,7 @@ if [[ "$mode" == "single" ]]; then
 
   initial=""
   if [[ -n "$ticket_file" ]]; then
-    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass; the brief was sharpened in /scope, do not re-grill. Every behavior-changing slice: tdd red-green-refactor — write the failing test first, then make it pass. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). ${harness_rule} After the final slice, run /ship to open the PR and trigger review. ${review_rule} ${stop_rule} No inter-slice confirmation."
+    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass; the brief was sharpened in /scope, do not re-grill. Every behavior-changing slice: invoke the tdd skill via the Skill tool (red-green-refactor) — write the failing test first, then make it pass; do not freestyle the loop from memory. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). ${harness_rule} After the final slice, run /ship to open the PR and trigger review. ${review_rule} ${stop_rule} No inter-slice confirmation."
   elif [[ -f "$HOME/.claude/plans/${plan_slug}.md" ]]; then
     # No ticket brief, but a plan exists (e.g. /address-feedback writes
     # ~/.claude/plans/PR-<num>-feedback.md). Drive the lane off the plan.
