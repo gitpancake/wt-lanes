@@ -51,6 +51,19 @@ git -C "$lanes/old-unpushed" push -q -u origin feature/old-unpushed
 git -C "$lanes/old-unpushed" -c user.email=t@t -c user.name=t commit -q --allow-empty -m wip
 age_lane old-unpushed
 
+# Old + clean (reapable) but a live process whose comm matches *claude* holds
+# the lane — Safety 0 must keep it, even with --force.
+mk_lane old-live feature/old-live
+age_lane old-live
+# Symlink, not copy — macOS AMFI SIGKILLs copied platform binaries. Exec via
+# the symlink makes comm carry "claude" on both macOS (full exec path) and
+# Linux (basename of the execve path).
+ln -s "$(command -v sleep)" "$TEST_TMP/claude"
+"$TEST_TMP/claude" 300 &
+live_pid=$!
+echo "$live_pid" > "$lanes/old-live/.claude/agent-pid"
+touch -t 202001010000 "$lanes/old-live/.claude/agent-state"
+
 out=$(WT_ROOTS="$root" "$GC" --dry-run)
 assert_contains "dry-run reports the reapable lane" "$out" "DRY-RUN would remove old-clean"
 assert_dir "dry-run removes nothing" "$lanes/old-clean"
@@ -65,5 +78,14 @@ assert_contains "dirty skip logged" "$out" "SKIP old-dirty — uncommitted chang
 assert_contains "ancient dirty notifies, never removes" "$out" "NOTIFY ancient-dirty"
 assert_contains "unpushed skip logged" "$out" "1 unpushed commit(s)"
 assert_contains "branch survives the reap" "$(gitc branch --list feature/old-clean)" "feature/old-clean"
+assert_dir "live-session lane kept" "$lanes/old-live"
+assert_contains "live-session skip logged" "$out" "SKIP old-live — live claude session (pid $live_pid"
+
+out=$(WT_ROOTS="$root" "$GC" --force)
+assert_dir "live-session lane survives --force" "$lanes/old-live"
+
+kill "$live_pid" 2>/dev/null; wait "$live_pid" 2>/dev/null
+out=$(WT_ROOTS="$root" "$GC")
+assert_no_dir "dead pid -> lane reaped normally" "$lanes/old-live"
 
 finish

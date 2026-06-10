@@ -15,6 +15,10 @@
 #   wt-gc --notify-dirty-hours 120  # dirty lanes older than N hours → NOTIFY (no removal)
 #
 # Safety checks (all must pass, unless --force):
+#   0. No live claude session in the lane (agent-pid / sessions/* pid alive and
+#      its comm matches *claude*) — NEVER skipped, even with --force. Removing
+#      the cwd under a running session makes every later hook spawn fail with
+#      ENOENT /bin/sh and strands the lane.
 #   1. State file mtime older than threshold (skipped when --reap-merged matches)
 #   2. Working tree clean (no uncommitted changes) — NEVER skipped, even with --force-merged
 #   3. No unpushed commits on the worktree's branch (or upstream missing AND branch merged to main)
@@ -89,6 +93,30 @@ branch_pr_merged() {
   [[ -n "$pr" && "$pr" != "null" ]]
 }
 
+# Live claude session attached to the lane? Hooks refresh .claude/agent-pid
+# (parent claude pid) and .claude/sessions/<pid> on every tool call. A pid is
+# only trusted when the process is alive AND its comm matches *claude* —
+# guards against pid reuse after a crash. Prints the live pid on success.
+lane_live_claude_pid() {
+  local wt="$1" f pid comm
+  for f in "$wt.claude/agent-pid" "$wt.claude/sessions/"*; do
+    [[ -f "$f" ]] || continue
+    if [[ "$f" == */agent-pid ]]; then
+      pid=$(<"$f")
+    else
+      pid=$(basename "$f")
+    fi
+    pid=${pid//[[:space:]]/}
+    [[ -n "$pid" && "$pid" != *[!0-9]* ]] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+    [[ "$comm" == *claude* ]] || continue
+    printf '%s' "$pid"
+    return 0
+  done
+  return 1
+}
+
 removed=0
 skipped=0
 notified=0
@@ -124,6 +152,14 @@ for root in "${ROOTS[@]}"; do
       pr_merged=1
     fi
     if (( age < THRESHOLD_SECS )) && (( ! pr_merged )); then
+      continue
+    fi
+
+    # Safety 0: live session — never reap under a running claude, even with
+    # --force (kill the session first if you really want the lane gone).
+    if live_pid=$(lane_live_claude_pid "$wt"); then
+      log "SKIP $lane — live claude session (pid $live_pid, age ${age_h}h, pr_merged=${pr_merged})"
+      skipped=$((skipped + 1))
       continue
     fi
 
