@@ -14,7 +14,7 @@ The board (`~/.tmux/agent-board.sh`) parses the code and colors the row by class
 | `verify`         | red    | verify-subagent rejected evidence; can't claim done.          |
 | `scope`          | red    | Scope creep detected; needs rescope decision.                 |
 | `external`       | yellow | External service / API down or rate-limited.                  |
-| `review`         | dim    | PR is up; awaiting human review. Not a blocker, just paused.  |
+| `review`         | dim    | PR up, review didn't land within the lane's poll window.      |
 | `input`          | red    | Fallback. Notification fired with no explicit code.           |
 
 ## Examples

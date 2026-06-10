@@ -438,9 +438,9 @@ JSON
 # its brief/plan and the harness's own instruction file; this prompt only
 # carries lane-lifecycle rules the agent can't derive from those.
 
-review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that trigger is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
+review_rule="The lane OWNS its review feedback loop end-to-end. After /ship posts the review trigger (mandatory — the single allowed \`gh pr comment\`), WAIT for the review: poll \`gh api repos/{owner}/{repo}/issues/<PR>/comments\` (the bot replies as a plain issue comment — body starts '**Chuck finished' with a '### Review' section — NEVER a GitHub Review object; reviews/reviewDecision stay empty forever, do not poll those). Poll with \`sleep 90\` between checks, up to 10 attempts (~15 min); reviews typically land in 2-3 min. When it lands, address EVERY finding — blockers (🔴) through advisory/nits — directly on the PR branch: fix, commit, push. A finding you judge wrong → one-line rebuttal in the final report, never a PR comment. Never post findings or replies to the PR conversation yourself (\`gh pr review --comment\` or any other \`gh\` write). Repo has no reviewer per repo policy → skip the loop."
 
-stop_rule="Stop when the PR is open and the review trigger is posted (or review skipped per repo policy). Do NOT wait or poll for review results — feedback is addressed later in a separate lane. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
+stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-pi}" == *claude* ]]; then
   harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Past ~120K context: commit, run /handoff, and stop — the next lane session /resumes the doc. Do not compact."
@@ -461,7 +461,7 @@ if [[ "$mode" == "single" ]]; then
     # No ticket brief, but a plan exists (e.g. /address-feedback writes
     # ~/.claude/plans/PR-<num>-feedback.md). Drive the lane off the plan.
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. ${harness_rule} Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} Stop when the plan's Done-when is met — do not wait or poll for review results — or on a genuine blocker (ambiguity not in the plan, repeated test failure same root cause, missing credential)."
+    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. ${harness_rule} Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} ${stop_rule}"
   elif [[ -n "$ticket" ]]; then
     initial="Autonomous mode. No brief found for ${ticket} — and no plan at ~/.claude/plans/${plan_slug}.md. Tell the user to /scope it first, then stop. Do not invent a brief."
   fi
@@ -518,7 +518,7 @@ if [[ "$slice_count" -le 1 ]]; then
   wt_path="$wt_dir/$slug"
   branch="${type_prefix}/${slug}"
   plan="$HOME/.claude/plans/${plan_slug}.md"
-  initial="Autonomous mode. Plan at ${plan}. Single-slice plan. Implement it, run /ship."
+  initial="Autonomous mode. Plan at ${plan}. Single-slice plan. Implement it, run /ship. ${review_rule} ${stop_rule}"
   spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
   exit 0
 fi
