@@ -429,22 +429,35 @@ JSON
   fi
 }
 
+# ---- lane kickoff prompt fragments ------------------------------------------
+# Shared by single-lane and DAG-fallback spawns. Kept terse: the lane re-reads
+# its brief/plan and the harness's own instruction file; this prompt only
+# carries lane-lifecycle rules the agent can't derive from those.
+
+review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that trigger is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
+
+stop_rule="Stop when the PR is open and the review trigger is posted (or review skipped per repo policy). Do NOT wait or poll for review results — feedback is addressed later in a separate lane. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
+
+if [[ "${WT_AGENT_CMD:-pi}" == *claude* ]]; then
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Auto-handoff fires at 120K context; do not wait for it, do not compact."
+else
+  harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
+fi
+
 # ---- single-lane mode ------------------------------------------------------
 
 if [[ "$mode" == "single" ]]; then
   wt_path="$wt_dir/$slug"
   branch="${branch_override:-${type_prefix}/${slug}}"
 
-  review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (note: reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that one is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
-
   initial=""
   if [[ -n "$ticket_file" ]]; then
-    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass. Brief was sharpened in /scope; do not re-grill. Every behavior-changing slice: open the /tdd red-green-refactor loop — write the failing test first, then make it pass. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Auto-handoff fires at 120K context; do not wait, do not compact. After the final slice, run /ship to open the PR and trigger review. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed. Genuine blocker (ambiguity not in the brief, repeated test failure same root cause, missing credential) → stop and report. No inter-slice confirmation."
+    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass; the brief was sharpened in /scope, do not re-grill. Every behavior-changing slice: tdd red-green-refactor — write the failing test first, then make it pass. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). ${harness_rule} After the final slice, run /ship to open the PR and trigger review. ${review_rule} ${stop_rule} No inter-slice confirmation."
   elif [[ -f "$HOME/.claude/plans/${plan_slug}.md" ]]; then
     # No ticket brief, but a plan exists (e.g. /address-feedback writes
     # ~/.claude/plans/PR-<num>-feedback.md). Drive the lane off the plan.
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} Stop only when the plan's Done-when is met, or a genuine blocker (ambiguity not in the plan, repeated test failure same root cause, missing credential)."
+    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. ${harness_rule} Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} Stop when the plan's Done-when is met — do not wait or poll for review results — or on a genuine blocker (ambiguity not in the plan, repeated test failure same root cause, missing credential)."
   elif [[ -n "$ticket" ]]; then
     initial="Autonomous mode. No brief found for ${ticket} — and no plan at ~/.claude/plans/${plan_slug}.md. Tell the user to /scope it first, then stop. Do not invent a brief."
   fi
@@ -479,8 +492,7 @@ case "$parse_rc" in
     wt_path="$wt_dir/$slug"
     branch="${type_prefix}/${slug}"
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    review_rule="Review findings: apply blocker/major fixes directly in the PR branch (commit + push), do NOT post them as PR comments. The single allowed \`gh pr comment\` is the review trigger that /ship posts at the end (note: reviewer bots may reply as a plain issue comment on the PR conversation rather than a GitHub Review object — read issue comments, not just reviews/reviewDecision) — that one is mandatory, do not skip it. Never post review *findings* or response comments yourself (\`gh pr review --comment\`, or any other \`gh\` write to the PR conversation). Minor/NB findings: include in the final report only."
-    initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. After the final slice, run /ship. ${review_rule} Stop only when the PR is open and review-driven fixes are pushed."
+    initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. ${harness_rule} After the final slice, run /ship. ${review_rule} ${stop_rule}"
     spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
     exit 0
     ;;
