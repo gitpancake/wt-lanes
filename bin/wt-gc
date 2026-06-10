@@ -70,14 +70,20 @@ notify() {
   (( QUIET )) || printf '%s\n' "$line"
 }
 
+# Cross-platform mtime (macOS stat -f vs Linux stat -c).
+_stat_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null; }
+
 # Check if a branch has a MERGED PR. Returns 0 on merged, 1 otherwise.
+# Runs gh from inside the worktree — gh resolves the repo from cwd, and
+# wt-gc's own cwd (cron: $HOME) is the wrong one, or worse, a *different*
+# repo whose PRs would be queried for this branch name.
 # Quiet on gh failures (auth, rate-limit) — caller treats as not-merged.
 branch_pr_merged() {
-  local branch="$1"
+  local wt="$1" branch="$2"
   [[ -n "$branch" ]] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   local pr
-  pr=$(gh pr list --head "$branch" --state merged --json number --jq '.[0].number' 2>/dev/null || true)
+  pr=$(cd "$wt" && gh pr list --head "$branch" --state merged --json number --jq '.[0].number' 2>/dev/null || true)
   [[ -n "$pr" && "$pr" != "null" ]]
 }
 
@@ -97,12 +103,13 @@ for root in "${ROOTS[@]}"; do
 
     considered=$((considered + 1))
     lane=$(basename "${wt%/}")
-    repo_dir=$(cd "$wt" && git rev-parse --show-toplevel 2>/dev/null || true)
-    main_repo=$(cd "$wt" && git rev-parse --git-common-dir 2>/dev/null | xargs -I{} dirname {} 2>/dev/null || true)
     # git-common-dir returns the .git dir of the main checkout; its parent is
     # the main worktree path we hand to `git worktree remove`.
+    common_dir=$(cd "$wt" && git rev-parse --git-common-dir 2>/dev/null || true)
+    main_repo=${common_dir:+$(dirname "$common_dir")}
 
-    state_mtime=$(stat -f %m "$state_file" 2>/dev/null || echo "$NOW")
+    state_mtime=$(_stat_mtime "$state_file")
+    [[ -n "$state_mtime" ]] || state_mtime=$NOW
     age=$(( NOW - state_mtime ))
     age_h=$(( age / 3600 ))
 
@@ -111,7 +118,7 @@ for root in "${ROOTS[@]}"; do
 
     # Gate: either mtime threshold OR (--reap-merged AND PR is MERGED).
     pr_merged=0
-    if (( REAP_MERGED )) && branch_pr_merged "$branch"; then
+    if (( REAP_MERGED )) && branch_pr_merged "$wt" "$branch"; then
       pr_merged=1
     fi
     if (( age < THRESHOLD_SECS )) && (( ! pr_merged )); then
