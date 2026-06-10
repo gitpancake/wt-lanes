@@ -69,12 +69,18 @@ authoritative source. The pid → window walk is a fallback.
 | `scripts/*` | `~/.claude/scripts/` |
 | `hooks/*` | `~/.claude/hooks/` |
 | `share/agent-state-vocab.md` | `~/.claude/agent-state-vocab.md` |
+| `share/state-codes.sh` | `~/.claude/state-codes.sh` |
 | `tmux/agent-board.sh` | `~/.tmux/agent-board.sh` |
 
-All symlinks. Edits in the clone land immediately.
+All symlinks. Edits in the clone land immediately. `agent-board.py` is not
+linked — the `.sh` launcher resolves it next to its own symlink target.
+Runtime state the hooks own: `~/.claude/wt-sessions/<pid>` (cockpit per-pid
+states, pruned on write).
 
 ## Editing rules
 
+- Run `tests/run.sh` after touching `bin/` or `scripts/` — plain bash + git,
+  no test deps.
 - `bin/wt` is the spawn contract. Adding flags is fine; changing existing
   flag semantics is breaking.
 - `tmux/agent-board.py` runs every 2s inside `watch` (launched through

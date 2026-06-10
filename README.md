@@ -13,10 +13,10 @@ sla-tracking                  WAITING:review     32K
 
 ## What it is
 
-A small bundle of bash + tmux glue that turns Pi from "one terminal
-window" into "an arbitrary number of fire-and-forget lanes you can see at a
-glance." The unit of work is a git worktree on its own branch, driven by its
-own Pi session, observable from a pinned status board.
+A small bundle of bash + tmux glue (plus a python status board) that turns
+Pi from "one terminal window" into "an arbitrary number of fire-and-forget
+lanes you can see at a glance." The unit of work is a git worktree on its own
+branch, driven by its own Pi session, observable from a pinned status board.
 
 The pieces:
 
@@ -83,6 +83,7 @@ Red = needs attention, yellow = external dep, green = active or done.
 
 | Env | Default | Purpose |
 |---|---|---|
+| `WT_ROOTS` | `~/Documents/code` | Colon-separated roots agent-board + wt-gc scan for worktrees. |
 | `WT_LAYOUT` | `window` | `pane`, `window`, or `session` — how the lane attaches to tmux. |
 | `WT_PI_MODEL` | `openai-codex/gpt-5.5` | Pi model the lane uses. |
 | `WT_AGENT_CMD` | `pi --model $WT_PI_MODEL` | Full launch command override. |
@@ -110,17 +111,31 @@ wt-lanes/
 │   ├── lane-pause.sh     manual state writer
 │   └── dag-parse.sh      DAG-mode plan parser
 ├── hooks/                Claude Code hooks
-│   ├── _state-write.sh   shared helper
+│   ├── _state-write.sh   shared helper (routes lane vs cockpit, atomic writes)
 │   ├── agent-state-active.sh
 │   ├── agent-state-idle.sh
 │   ├── agent-state-waiting.sh
 │   └── precheck-stop.sh
 ├── share/
-│   └── agent-state-vocab.md   reason-code vocab
-├── tmux/agent-board.sh        the status board
+│   ├── agent-state-vocab.md   reason-code vocab (human docs)
+│   └── state-codes.sh         reason-code vocab (machine source of truth)
+├── tests/                     dependency-free bash suite — tests/run.sh
+├── tmux/
+│   ├── agent-board.py         the status board
+│   └── agent-board.sh         thin launcher (installed path contract)
 ├── install.sh
 └── uninstall.sh
 ```
+
+## Tests
+
+```bash
+tests/run.sh        # whole suite; plain bash + git, no bats needed
+```
+
+Covers dag-parse's exit-code contract, `wt`'s slug/ticket/epic/tombstone
+resolution and dry-run spawn derivation, and wt-gc's safety gates
+(age / dirty / unpushed / notify).
 
 ## Non-goals
 
