@@ -31,6 +31,13 @@ bold=$'\033[1m'
 _stat_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 _stat_size()  { stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null || echo 0; }
 
+# Reverse-cat: BSD has tail -r, GNU has tac. Probe once.
+if tail -r /dev/null >/dev/null 2>&1; then
+  _tail_reverse() { tail -r "$1" 2>/dev/null; }
+else
+  _tail_reverse() { tac "$1" 2>/dev/null; }
+fi
+
 # Named Python parsers for jsonl extraction.
 _extract_ctx_tokens() {
   python3 -c '
@@ -152,7 +159,7 @@ _ctx_from_jsonl() {
     fi
   fi
   local tokens
-  tokens=$(tail -r "$latest" 2>/dev/null | grep -m1 '"usage"' | _extract_ctx_tokens)
+  tokens=$(_tail_reverse "$latest" | grep -m1 '"usage"' | _extract_ctx_tokens)
   [[ -n "$tokens" ]] || tokens=0
   mkdir -p "$(dirname "$cache_file")" 2>/dev/null
   printf '%s:%s:%s\n' "$mtime" "$size" "$tokens" > "$cache_file" 2>/dev/null

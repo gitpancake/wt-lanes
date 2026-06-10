@@ -24,8 +24,17 @@ notify() {
     terminal-notifier -title "lane: $slug" -message "$msg" >/dev/null 2>&1 || true
   elif command -v osascript >/dev/null 2>&1; then
     osascript -e "display notification \"$msg\" with title \"lane: $slug\"" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "lane: $slug" "$msg" >/dev/null 2>&1 || true
   fi
 }
+
+# Reverse-cat: BSD has tail -r, GNU has tac. Probe once.
+if tail -r /dev/null >/dev/null 2>&1; then
+  _tail_reverse() { tail -r "$1" 2>/dev/null; }
+else
+  _tail_reverse() { tac "$1" 2>/dev/null; }
+fi
 
 # Ctx tokens from newest jsonl session for this worktree.
 ctx_tokens() {
@@ -35,7 +44,7 @@ ctx_tokens() {
   local latest
   latest=$(ls -t "$sess_dir"/*.jsonl 2>/dev/null | head -n1)
   [[ -n "$latest" && -f "$latest" ]] || { printf ''; return; }
-  tail -r "$latest" 2>/dev/null | grep -m1 '"usage"' | python3 -c '
+  _tail_reverse "$latest" | grep -m1 '"usage"' | python3 -c '
 import json,sys
 try:
   d=json.loads(sys.stdin.read())
