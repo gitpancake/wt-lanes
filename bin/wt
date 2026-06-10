@@ -345,12 +345,16 @@ spawn_lane() {
   fi
 
   if [[ ! -f "$s_wt/.claude/settings.local.json" ]]; then
+    # Lanes are autonomous: drop cockpit-UX plugins (chat-compression modes,
+    # scaffolding helpers) — they cost session-start + per-turn context and
+    # serve no headless reader.
     cat > "$s_wt/.claude/settings.local.json" <<'JSON'
 {
   "enabledPlugins": {
     "vercel@claude-plugins-official": false,
     "claude-md-management@claude-plugins-official": false,
-    "skill-creator@claude-plugins-official": false
+    "skill-creator@claude-plugins-official": false,
+    "caveman@caveman": false
   }
 }
 JSON
@@ -439,7 +443,7 @@ review_rule="Review findings: apply blocker/major fixes directly in the PR branc
 stop_rule="Stop when the PR is open and the review trigger is posted (or review skipped per repo policy). Do NOT wait or poll for review results — feedback is addressed later in a separate lane. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-pi}" == *claude* ]]; then
-  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Auto-handoff fires at 120K context; do not wait for it, do not compact."
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / bugfinder) via the Agent tool — do not impersonate it inline. Past ~120K context: commit, run /handoff, and stop — the next lane session /resumes the doc. Do not compact."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
 fi
