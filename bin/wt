@@ -3,7 +3,6 @@
 #
 # Usage:
 #   wt [--type <prefix>] <task-slug-or-ticket>     # single lane, one-shot pi (default)
-#   wt --loop [--type <prefix>] <task-slug>        # deprecated alias for normal single-lane pickup
 #   wt --branch <name> [--type ...] <slug>         # single lane on an existing branch (e.g. a PR head)
 #   wt --dag [--type <prefix>] <TICKET>            # parse plan DAG, spawn ready-set lanes (dormant)
 #   wt --resolve [--type <prefix>] <TICKET>        # re-spawn ready-set after slices merged (dormant)
@@ -59,13 +58,11 @@ set -euo pipefail
 mode="single"
 type_prefix="${WT_TYPE:-feature}"
 branch_override=""
-deprecated_loop=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dag)     mode="dag";     shift ;;
     --resolve) mode="resolve"; shift ;;
-    --loop)    deprecated_loop=1; shift ;;
     --print-brief) mode="print-brief"; shift ;;
     --type)
       [[ -z "${2:-}" ]] && { echo "wt: --type requires an argument" >&2; exit 1; }
@@ -93,7 +90,6 @@ type_prefix=$(printf '%s' "$type_prefix" | tr '[:upper:]' '[:lower:]' | sed -E '
 
 raw=${1:-}
 [[ -z "$raw" ]] && { echo "usage: wt [--dag|--resolve] [--type <prefix>] <task-slug-or-ticket>" >&2; exit 1; }
-[[ "$deprecated_loop" == "1" ]] && echo "wt: --loop is deprecated; spawning a normal Pi lane" >&2
 
 # Derive a slug descriptor from the plan's first heading.
 #   '# TEAM-1234 — Add foo bar' → 'add-foo-bar'

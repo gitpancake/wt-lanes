@@ -53,7 +53,6 @@ Optional: `jq`, `terminal-notifier` (macOS) / `notify-send` (linux).
 ```bash
 wt my-feature                          # spawn a lane on a fresh branch
 wt --branch existing-pr-branch         # spawn a lane on an existing branch
-wt --loop my-feature                   # deprecated alias for normal single-lane pickup
 wt --dag epic-slug                     # spawn ready-set lanes from a plan DAG
 wt-gc                                  # reap dead lanes
 ```
@@ -109,7 +108,6 @@ wt-lanes/
 ├── scripts/              called by absolute path from wt + hooks
 │   ├── lane-watch.sh     per-lane monitor pane
 │   ├── lane-pause.sh     manual state writer
-│   ├── wt-loop.sh        deprecated legacy outer loop driver
 │   └── dag-parse.sh      DAG-mode plan parser
 ├── hooks/                Claude Code hooks
 │   ├── _state-write.sh   shared helper
