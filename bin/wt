@@ -361,7 +361,9 @@ JSON
   fi
 
   local agent_cmd lane_cmd
-  agent_cmd="${WT_AGENT_CMD:-pi --model ${WT_PI_MODEL:-openai-codex/gpt-5.5}}"
+  # Default agent = Claude via claude-lane ($WT_CLAUDE). Pi only on explicit
+  # WT_AGENT_CMD='pi ...' override (tix sets it per ticket root).
+  agent_cmd="${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}"
 
   lane_cmd="$agent_cmd"
   [[ -n "$s_initial" ]] && lane_cmd="$agent_cmd $(printf '%q' "$s_initial")"
@@ -442,7 +444,7 @@ review_rule="The lane OWNS its review feedback loop end-to-end. After /ship post
 
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
-if [[ "${WT_AGENT_CMD:-pi}" == *claude* ]]; then
+if [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]]; then
   harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~120K context (a non-blocking nudge fires at 130K/160K/190K): wrap the in-flight slice, commit, run /handoff, and stop — the next lane session /resumes the doc and continues the brief, including a pending review loop. Do not compact."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
