@@ -14,6 +14,9 @@
 #     when the background job finishes. agent-board picks it up on next refresh.
 #   - If a new Stop fires while a precheck is already running, the old one is
 #     killed and replaced. Caller never has to wait.
+#   - The worker only publishes DONE/FAILED while the state file still reads
+#     RUNNING:precheck. If the agent started a new turn meanwhile (state is
+#     ACTIVE:* again), the stale result is dropped — the next Stop reruns it.
 
 set -u
 
@@ -41,11 +44,18 @@ echo "RUNNING:precheck" > "$state_file"
 
 # Fully detach the worker. Stop hook returns immediately; no blocking.
 (
+  finish() {
+    # Drop the result if anything else (a new turn's ACTIVE, a WAITING tag)
+    # has written the state since we claimed it — never move the machine
+    # backwards from a fresher state.
+    [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "RUNNING:precheck" ]] || return 0
+    echo "$1" > "$state_file"
+  }
   if "$script" >"$log" 2>&1; then
-    echo "DONE" > "$state_file"
+    finish "DONE"
   else
     step=$(grep -oE '^(typecheck|test|lint|build)' "$log" 2>/dev/null | head -n1)
-    echo "FAILED:${step:-precheck}" > "$state_file"
+    finish "FAILED:${step:-precheck}"
   fi
   rm -f "$pid_file"
 ) </dev/null >/dev/null 2>&1 &
