@@ -4,6 +4,7 @@
 # Usage:
 #   wt [--type <prefix>] <task-slug-or-ticket>     # single lane, one-shot pi (default)
 #   wt --branch <name> [--type ...] <slug>         # single lane on an existing branch (e.g. a PR head)
+#   wt --base <ref> [--type ...] <slug>            # base the new lane branch on <ref> (default: origin default branch)
 #   wt --dag [--type <prefix>] <TICKET>            # parse plan DAG, spawn ready-set lanes (dormant)
 #   wt --resolve [--type <prefix>] <TICKET>        # re-spawn ready-set after slices merged (dormant)
 #   wt --print-brief <task-slug-or-ticket>         # resolve + print the brief path, then exit
@@ -36,6 +37,7 @@
 #
 # Env knobs:
 #   WT_TYPE=          branch type prefix (default: feature)
+#   WT_BASE=          base ref for new lane branches (same as --base)
 #   WT_NO_FETCH=1     skip pre-spawn fetch + ff
 #   WT_LAYOUT=        pane|window|session (default: window)
 #   WT_AGENT_CMD='pi ...' full launch command override
@@ -45,7 +47,9 @@
 #
 # Effect (per lane):
 #   - Worktree at <repo>/.claude/worktrees/<slug>
-#   - Branch <type>/<slug> off current HEAD (skipped if branch already exists)
+#   - Branch <type>/<slug> off origin's default branch — HEAD only when the
+#     cockpit IS the default branch; --base/WT_BASE overrides; skipped if the
+#     branch already exists
 #   - Per-lane port stamped in .env.local.port (3100 + lane index)
 #   - .claude/agent-state seeded as IDLE (visible to agent-board)
 #   - In tmux: opens new window running pi, with optional initial prompt
@@ -58,6 +62,7 @@ set -euo pipefail
 mode="single"
 type_prefix="${WT_TYPE:-feature}"
 branch_override=""
+base_override="${WT_BASE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       [[ -z "${2:-}" ]] && { echo "wt: --branch requires an argument" >&2; exit 1; }
       branch_override="$2"; shift 2 ;;
     --branch=*) branch_override="${1#--branch=}"; shift ;;
+    --base)
+      [[ -z "${2:-}" ]] && { echo "wt: --base requires an argument" >&2; exit 1; }
+      base_override="$2"; shift 2 ;;
+    --base=*)  base_override="${1#--base=}"; shift ;;
     -h|--help) sed -n '2,/^$/{ s/^# \?//; p; }' "$0"; exit 0 ;;
     --)        shift; break ;;
     -*)        echo "wt: unknown flag $1 (try --help)" >&2; exit 1 ;;
@@ -273,6 +282,34 @@ if [[ -z "${WT_NO_FETCH:-}" ]]; then
   fi
 fi
 
+# New lane branches base off origin's default branch, NOT the cockpit HEAD —
+# a cockpit parked on a feature branch must not leak its history into fresh
+# lanes (digest post-mortem epic, 2026-06-12: lanes spawned 22 commits behind
+# main). HEAD stays the base only when the cockpit IS the default branch, so a
+# deliberately-ahead local main still works. --base/WT_BASE overrides (e.g.
+# /pickup fork-off onto a feature BASE).
+lane_base_ref="$base_override"
+if [[ -n "$lane_base_ref" ]]; then
+  git -C "$repo" rev-parse --verify "${lane_base_ref}^{commit}" >/dev/null 2>&1 \
+    || { echo "wt: base '$lane_base_ref' does not resolve to a commit" >&2; exit 1; }
+else
+  default_branch=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  if [[ -z "$default_branch" ]]; then
+    for default_cand in main master; do
+      if git -C "$repo" rev-parse --verify "origin/$default_cand" >/dev/null 2>&1; then
+        default_branch="$default_cand"; break
+      fi
+    done
+  fi
+  cockpit_branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+  if [[ -n "$default_branch" && "$cockpit_branch" != "$default_branch" ]]; then
+    lane_base_ref="origin/$default_branch"
+    echo "wt: cockpit on '$cockpit_branch' — new lane branches base off origin/$default_branch (override with --base)" >&2
+  else
+    lane_base_ref="HEAD"
+  fi
+fi
+
 layout="${WT_LAYOUT:-window}"
 
 # ---- lane spawn helper -----------------------------------------------------
@@ -304,12 +341,14 @@ spawn_lane() {
   elif [[ ! -d "$s_wt" ]]; then
     # Local branch or remote-only branch (e.g. a PR head fetched into origin/*)
     # → check it out as-is; git DWIMs a tracking branch from origin/<name>.
-    # Otherwise create a fresh branch off HEAD.
+    # Otherwise create a fresh branch off $lane_base_ref. --no-track: a lane
+    # branch based on origin/main must not push back to main.
     if git -C "$repo" rev-parse --verify "$s_branch" >/dev/null 2>&1 \
        || git -C "$repo" rev-parse --verify "origin/$s_branch" >/dev/null 2>&1; then
       git -C "$repo" worktree add "$s_wt" "$s_branch"
     else
-      git -C "$repo" worktree add "$s_wt" -b "$s_branch"
+      git -C "$repo" branch --no-track "$s_branch" "$lane_base_ref"
+      git -C "$repo" worktree add "$s_wt" "$s_branch"
     fi
   fi
 
@@ -553,6 +592,12 @@ if git -C "$repo" rev-parse --verify "$feature_branch" >/dev/null 2>&1; then
 else
   # Cockpit HEAD is the implicit base; treat its history as "merged".
   feature_ref="HEAD"
+fi
+
+# DAG slice lanes merge into the integration branch — base new slice branches
+# on it, not on origin's default branch. An explicit --base/WT_BASE still wins.
+if [[ "$feature_ref" != "HEAD" && -z "$base_override" ]]; then
+  lane_base_ref="$feature_ref"
 fi
 
 is_merged() {
