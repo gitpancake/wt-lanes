@@ -277,7 +277,7 @@ if [[ -z "${WT_NO_FETCH:-}" ]]; then
   if [[ "$current" == "main" || "$current" == "master" ]]; then
     if git -C "$repo" merge-base --is-ancestor HEAD "origin/$current" 2>/dev/null; then
       git -C "$repo" merge --ff-only "origin/$current" \
-        || echo "wt: warning, fast-forward of $current failed (dirty tree?)" >&2
+        || echo "wt: WARNING — local $current is BEHIND origin/$current and the ff failed (dirty tree?). Lanes will still base off origin/$current, but commit/stash your cockpit changes to unstick local $current." >&2
     fi
   fi
 fi
@@ -285,8 +285,9 @@ fi
 # New lane branches base off origin's default branch, NOT the cockpit HEAD —
 # a cockpit parked on a feature branch must not leak its history into fresh
 # lanes (digest post-mortem epic, 2026-06-12: lanes spawned 22 commits behind
-# main). HEAD stays the base only when the cockpit IS the default branch, so a
-# deliberately-ahead local main still works. --base/WT_BASE overrides (e.g.
+# main). When the cockpit IS the default branch we still prefer the fresh
+# origin ref, falling back to HEAD only when local main is genuinely AHEAD of
+# origin (deliberately-ahead unpushed commits). --base/WT_BASE overrides (e.g.
 # /pickup fork-off onto a feature BASE).
 lane_base_ref="$base_override"
 if [[ -n "$lane_base_ref" ]]; then
@@ -305,6 +306,14 @@ else
   if [[ -n "$default_branch" && "$cockpit_branch" != "$default_branch" ]]; then
     lane_base_ref="origin/$default_branch"
     echo "wt: cockpit on '$cockpit_branch' — new lane branches base off origin/$default_branch (override with --base)" >&2
+  elif [[ -n "$default_branch" ]] \
+       && git -C "$repo" merge-base --is-ancestor HEAD "origin/$default_branch" 2>/dev/null; then
+    # Cockpit IS the default branch: base off the freshly-fetched origin ref,
+    # not local HEAD. Local $default_branch only advances on a *successful* ff,
+    # and a dirty tree silently aborts it (PP §66: same bug class as the
+    # 2026-06-12 fix above). Fall back to HEAD only when local main is genuinely
+    # AHEAD of origin (deliberately-ahead unpushed commits).
+    lane_base_ref="origin/$default_branch"
   else
     lane_base_ref="HEAD"
   fi
