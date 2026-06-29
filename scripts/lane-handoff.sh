@@ -45,6 +45,13 @@ if [[ ! -f "$doc" ]]; then
   exit 2
 fi
 
+# Auto-prune spent handoffs: nothing else ever deletes them (the /handoff
+# skill, /resume, and this runner only write/read), so the dir grew unbounded
+# (331 docs back to May). A lane consumes its handoff within minutes of the
+# respawn, so anything older than the window is provably spent — and the doc
+# we just handed off is far younger than the window, so this never eats it.
+find "$HOME/.claude/handoffs" -maxdepth 1 -name '*.md' -mtime +"${HANDOFF_RETENTION_DAYS:-14}" -delete 2>/dev/null || true
+
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 mkdir -p "$dir/.claude"
 state_file="$dir/.claude/agent-state"
