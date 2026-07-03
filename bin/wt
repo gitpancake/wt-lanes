@@ -295,7 +295,8 @@ if [[ -n "$lane_base_ref" ]]; then
   git -C "$repo" rev-parse --verify "${lane_base_ref}^{commit}" >/dev/null 2>&1 \
     || { echo "wt: base '$lane_base_ref' does not resolve to a commit" >&2; exit 1; }
 else
-  default_branch=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  default_branch=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || true
+  default_branch="${default_branch#origin/}"
   if [[ -z "$default_branch" ]]; then
     for default_cand in main master; do
       if git -C "$repo" rev-parse --verify "origin/$default_cand" >/dev/null 2>&1; then
@@ -314,6 +315,20 @@ else
     # and a dirty tree silently aborts it (PP §66: same bug class as the
     # 2026-06-12 fix above). Fall back to HEAD only when local main is genuinely
     # AHEAD of origin (deliberately-ahead unpushed commits).
+    lane_base_ref="origin/$default_branch"
+  elif [[ -n "$default_branch" ]] \
+       && git -C "$repo" merge-base --is-ancestor "origin/$default_branch" HEAD 2>/dev/null; then
+    # origin is an ancestor of HEAD: local $default_branch is ahead-only
+    # (deliberately-unpushed commits). Preserve them as the lane base.
+    lane_base_ref="HEAD"
+  elif [[ -n "$default_branch" ]]; then
+    # Neither is an ancestor of the other: local $default_branch has DIVERGED
+    # from origin (e.g. a local-only docs commit sitting under commits that
+    # landed on origin meanwhile). Basing off local HEAD would silently drop
+    # every origin-only commit from new lanes (2026-07-02: every pickup lane
+    # forked off a local main 11 commits behind origin). Prefer the fresh
+    # origin ref and warn instead of guessing.
+    echo "wt: local $default_branch has DIVERGED from origin/$default_branch — new lane branches base off origin/$default_branch (override with --base). Rebase local $default_branch onto origin/$default_branch to clear this." >&2
     lane_base_ref="origin/$default_branch"
   else
     lane_base_ref="HEAD"
@@ -351,6 +366,7 @@ spawn_lane() {
     echo "wt[dry-run]: would spawn lane"
     echo "  slug:     $s_slug"
     echo "  branch:   $s_branch"
+    echo "  base:     $lane_base_ref"
     echo "  worktree: $s_wt"
     [[ -n "$s_initial" ]] && echo "  kickoff:  $s_initial"
     return 0
