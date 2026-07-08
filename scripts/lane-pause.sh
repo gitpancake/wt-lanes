@@ -55,3 +55,6 @@ if (( ${#detail} > max_detail )); then
 fi
 
 write_state "WAITING:${code}:${detail}"
+# A deliberately paused lane must never respawn off an earlier handoff in
+# this session — the tag, not the stale doc, is the exit reason.
+rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/handoff-doc"

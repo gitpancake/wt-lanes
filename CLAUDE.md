@@ -7,9 +7,9 @@ Three roles in the system:
 
 1. **Producer** — `bin/wt` spawns a worktree + branch + tmux pane + Claude
    session, launched through `scripts/lane-run.sh`: the runner relaunches the
-   agent with a /resume prompt when it exits in `HANDOFF:<doc>` state (capped
-   at `WT_MAX_RESPAWNS`, default 3; cap hit → re-tag `WAITING:input` via
-   lane-pause). An interactive claude never exits on its own, so
+   agent with a /resume prompt when it exits with a `.claude/handoff-doc`
+   sentinel present (capped at `WT_MAX_RESPAWNS`, default 3; cap hit →
+   re-tag `WAITING:input` via lane-pause). An interactive claude never exits on its own, so
    `lane-handoff.sh` TERMs the lane's claude (pid from `agent-pid`, NEVER an
    ancestor walk — that kills the cockpit on manual runs) after a grace
    period; that exit is what unblocks the runner. Seeds
@@ -35,6 +35,11 @@ Three roles in the system:
    final tool calls — `lane-pause.sh` (WAITING), `lane-done.sh` (DONE),
    `lane-handoff.sh` (HANDOFF:<doc>) — and the Stop-chain hooks preserve
    those states instead of clobbering them to IDLE/precheck verdicts.
+   The ACTIVE hooks write unconditionally, so agent-state is display-only
+   for handoffs: the respawn contract is `<wt>/.claude/handoff-doc`,
+   written only by lane-handoff.sh, consumed (deleted) only by lane-run.sh,
+   cleared by lane-done/lane-pause so a deliberate final call wins. Hooks
+   must never touch it — that immunity to hook races is its entire point.
 3. **Bins resolve scripts/hooks via absolute paths** to `~/.claude/scripts`
    and `~/.claude/hooks`. install.sh symlinks files there. Do not
    `dirname $0`-relative — bins are symlinked onto PATH and would lose

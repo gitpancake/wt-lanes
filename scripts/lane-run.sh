@@ -2,12 +2,21 @@
 # Lane runner: keeps "the next session /resumes the handoff doc" honest.
 #
 # wt launches every lane through this wrapper instead of the raw agent
-# command. When the agent process exits, the runner reads the lane's
-# agent-state: HANDOFF:<doc> (written by lane-handoff.sh as the agent's final
-# tool call) → respawn a fresh agent session prompted to /resume the doc;
-# anything else (DONE, WAITING:*, IDLE, crash) → exit and let the tmux window
-# close as before. Without this, the ctx-cap doctrine's "next lane session
-# resumes" was fiction — a lane that handed off mid-brief just died silently.
+# command. When the agent process exits, the runner checks the lane's
+# handoff sentinel (.claude/handoff-doc, written by lane-handoff.sh as the
+# agent's final tool call) → consume it and respawn a fresh agent session
+# prompted to /resume the doc; no sentinel (DONE, WAITING:*, quit, crash) →
+# exit and let the tmux window close as before. Without this, the ctx-cap
+# doctrine's "next lane session resumes" was fiction — a lane that handed
+# off mid-brief just died silently.
+#
+# Why a sentinel and not agent-state: the state file has five writers, and
+# the ACTIVE hooks write unconditionally. A hook still in flight when
+# lane-handoff's delayed kill landed could clobber HANDOFF between the
+# watcher's re-assert and this loop's read — the runner then exited instead
+# of respawning and the tmux window vanished mid-handoff. The sentinel has
+# exactly one writer (lane-handoff.sh) and one consumer (this loop), so kill
+# timing can't race it. agent-state still carries HANDOFF for the board.
 #
 # Exit trigger: an interactive claude session never exits when its turn ends
 # (it idles at the REPL prompt), so lane-handoff.sh kills the session after a
@@ -36,7 +45,7 @@ agent_cmd=$2
 prompt=$3
 resume_template=${4:-}
 max_respawns=${WT_MAX_RESPAWNS:-3}
-state_file="$wt_path/.claude/agent-state"
+doc_file="$wt_path/.claude/handoff-doc"
 
 cd "$wt_path" || exit 1
 
@@ -48,14 +57,11 @@ while :; do
     eval "$agent_cmd"
   fi
 
-  state=$(tail -n1 "$state_file" 2>/dev/null || true)
-  case "$state" in
-    HANDOFF:*) ;;
-    *) exit 0 ;;
-  esac
+  doc=$(head -n1 "$doc_file" 2>/dev/null || true)
+  [[ -n "$doc" ]] || exit 0
   [[ -n "$resume_template" ]] || exit 0
 
-  doc=${state#HANDOFF:}
+  rm -f "$doc_file"
   if (( respawns >= max_respawns )); then
     "$HOME/.claude/scripts/lane-pause.sh" input \
       "handoff respawn cap ($max_respawns) hit — /resume manually: $doc"

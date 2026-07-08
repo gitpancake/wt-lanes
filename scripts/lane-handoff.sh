@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Mark the lane handed off: agent-state → HANDOFF:<doc-path>. The lane agent
+# Mark the lane handed off: agent-state → HANDOFF:<doc-path> (board display)
+# and .claude/handoff-doc → <doc-path> (the respawn contract). The lane agent
 # runs this as its FINAL tool call, right after /handoff writes the doc, when
 # context forces a session swap mid-brief. lane-run.sh (the lane runner) sees
-# the state when the agent process exits and respawns a fresh session that
+# the sentinel when the agent process exits and respawns a fresh session that
 # /resumes the doc — this script is what makes "the next session resumes"
 # true instead of aspirational.
 #
@@ -66,6 +67,16 @@ case "$dir" in
     exit 0 ;;
 esac
 
+# The respawn contract rides on this sentinel, not on agent-state: the state
+# file's ACTIVE hooks write unconditionally, so a hook in flight when the
+# delayed kill landed could clobber HANDOFF and make lane-run exit (closing
+# the tmux window) instead of respawning. One writer (here), one consumer
+# (lane-run, which deletes it before respawning); lane-done/lane-pause clear
+# it so a later deliberate final call always wins over a stale handoff.
+doc_file="$dir/.claude/handoff-doc"
+doc_tmp="$doc_file.tmp.$$"
+printf '%s\n' "$doc" > "$doc_tmp" && mv -f "$doc_tmp" "$doc_file"
+
 lane_pid=$(tr -d ' \n' < "$dir/.claude/agent-pid" 2>/dev/null || true)
 if [[ -z "$lane_pid" || "$lane_pid" == *[!0-9]* ]]; then
   printf 'lane-handoff: state set, but no agent-pid recorded — kill the lane session yourself so lane-run.sh can respawn with %s\n' "$doc"
@@ -82,10 +93,11 @@ grace=${WT_HANDOFF_KILL_GRACE:-20}
 (
   sleep "$grace"
   # The lane may have kept working past the contract and even declared DONE.
-  # DONE wins — never kill a finished lane into a respawn. Anything else:
-  # re-assert HANDOFF so the runner respawns rather than exiting on a stray
-  # ACTIVE/IDLE written by a later hook.
-  [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "DONE" ]] && exit 0
+  # DONE wins — never kill a finished lane into a respawn; drop the sentinel
+  # so a later session exit can't resurrect the spent handoff. Anything else:
+  # re-assert HANDOFF so the board shows the truth while the runner recycles
+  # (the respawn itself keys off the sentinel, immune to hook clobbers).
+  [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "DONE" ]] && { rm -f "$doc_file"; exit 0; }
   retmp="$state_file.tmp.handoff.$$"
   printf 'HANDOFF:%s\n' "$doc" > "$retmp" && mv -f "$retmp" "$state_file"
   kill -TERM "$lane_pid" 2>/dev/null
