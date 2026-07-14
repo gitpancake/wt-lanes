@@ -377,12 +377,13 @@ spawn_lane() {
     return 0
   fi
 
-  # Concurrency cap. Each active lane fans out workflow subagents plus repeated
-  # typecheck/test runs (a cartage-agent `tsc --noEmit` peaks ~5.4GB); 3+
-  # concurrent lanes swap-thrash the 16GB cockpit (2026-07-14: load avg 20,
-  # 3.4GB swap used). Running lanes are counted by their claude-lane
-  # fingerprint (--mcp-config mcp.lane.json). WT_MAX_LANES=0 disables.
-  local max_lanes="${WT_MAX_LANES:-2}"
+  # Concurrency backstop, not a throttle: blocks runaway lane accumulation
+  # (2026-07-14: concurrent lane typechecks — cartage-agent `tsc --noEmit`
+  # peaks ~5.4GB each — swap-thrashed the 16GB cockpit; memory pressure is
+  # handled by the lane-bin typecheck lock, this cap only stops pile-ups).
+  # Running lanes are counted by their claude-lane fingerprint
+  # (--mcp-config mcp.lane.json). WT_MAX_LANES=0 disables.
+  local max_lanes="${WT_MAX_LANES:-10}"
   if (( max_lanes > 0 )); then
     local active_lanes
     active_lanes=$(pgrep -f 'mcp\.lane\.json' 2>/dev/null | wc -l | tr -d ' ') || true
