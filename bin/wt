@@ -337,6 +337,11 @@ fi
 
 layout="${WT_LAYOUT:-window}"
 
+# Lanes spawned by this invocation, counted by the WT_MAX_LANES guard in
+# spawn_lane — pgrep can't see lanes whose tmux window exists but whose
+# claude process hasn't booted yet (DAG mode spawns several back-to-back).
+spawned_this_run=0
+
 # ---- lane spawn helper -----------------------------------------------------
 # Args: <slug> <branch> <wt_path> <initial-prompt-or-empty> [tmux-label]
 spawn_lane() {
@@ -536,7 +541,7 @@ review_rule="The lane OWNS its review feedback loop end-to-end. After /ship post
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]]; then
-  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~120K context (a non-blocking nudge fires at 130K/160K/190K): if implementation is shipped and only the review loop remains, do NOT hand off — finish the loop (one poll + one feedback pass) and lane-done.sh. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~240K context (a non-blocking nudge fires at 260K/320K/380K): if implementation is shipped and only the review loop remains, do NOT hand off — finish the loop (one poll + one feedback pass) and lane-done.sh. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
   resume_template="Autonomous mode, resumed after a context handoff ({N}/{MAX}). Run /resume with the handoff doc at {DOC} — it carries the lane state; re-read the brief it points to before acting. Continue the work end-to-end, including any pending review loop. ${review_rule} ${stop_rule} If context forces another handoff: /handoff, then ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
