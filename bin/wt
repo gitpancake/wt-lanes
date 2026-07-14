@@ -377,6 +377,22 @@ spawn_lane() {
     return 0
   fi
 
+  # Concurrency cap. Each active lane fans out workflow subagents plus repeated
+  # typecheck/test runs (a cartage-agent `tsc --noEmit` peaks ~5.4GB); 3+
+  # concurrent lanes swap-thrash the 16GB cockpit (2026-07-14: load avg 20,
+  # 3.4GB swap used). Running lanes are counted by their claude-lane
+  # fingerprint (--mcp-config mcp.lane.json). WT_MAX_LANES=0 disables.
+  local max_lanes="${WT_MAX_LANES:-2}"
+  if (( max_lanes > 0 )); then
+    local active_lanes
+    active_lanes=$(pgrep -f 'mcp\.lane\.json' 2>/dev/null | wc -l | tr -d ' ') || true
+    if (( active_lanes + spawned_this_run >= max_lanes )); then
+      echo "wt: lane cap hit — $active_lanes running + $spawned_this_run spawned this run >= WT_MAX_LANES=$max_lanes. Wait for a lane to finish, or override: WT_MAX_LANES=$((active_lanes + spawned_this_run + 1)) wt ..." >&2
+      return 1
+    fi
+  fi
+  spawned_this_run=$((spawned_this_run + 1))
+
   # If the branch is already checked out in an existing worktree, reuse it —
   # git forbids a second checkout of the same branch (common when picking up
   # feedback on a PR whose lane worktree is still around).
