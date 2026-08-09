@@ -401,7 +401,7 @@ spawn_lane() {
   existing_wt=$(git -C "$repo" worktree list --porcelain \
     | awk -v b="refs/heads/$s_branch" '
         /^worktree /{ wt = substr($0, 10) }
-        /^branch /{ if ($2 == b) { print wt; exit } }')
+        /^branch /{ if ($2 == b && !found) { print wt; found = 1 } }')
   if [[ -n "$existing_wt" ]]; then
     echo "wt: branch '$s_branch' already checked out at $existing_wt — reusing it"
     s_wt="$existing_wt"
@@ -553,7 +553,7 @@ JSON
 # its brief/plan and the harness's own instruction file; this prompt only
 # carries lane-lifecycle rules the agent can't derive from those.
 
-review_rule="The lane OWNS its review feedback loop end-to-end. After /ship posts the review trigger (mandatory — the single allowed \`gh pr comment\`), WAIT for the review: poll \`gh api repos/{owner}/{repo}/issues/<PR>/comments\` (the bot replies as a plain issue comment — match author chuck-noland[bot] + body starting '**Chuck finished'; the section header varies, do not match on it — NEVER a GitHub Review object; reviews/reviewDecision stay empty forever, do not poll those). Poll with \`sleep 90\` between checks, up to 10 attempts (~15 min); reviews typically land in 2-3 min. When it lands, address EVERY finding — blockers (🔴) through advisory/nits — directly on the PR branch: fix, commit, push. A finding you judge wrong → one-line rebuttal in the final report, never a PR comment. Never post findings or replies to the PR conversation yourself (\`gh pr review --comment\` or any other \`gh\` write). Repo has no reviewer per repo policy → skip the loop."
+review_rule="The lane OWNS its review feedback loop end-to-end. Reviews fire AUTOMATICALLY on PR open/push — nothing to tag or trigger; pushing new commits IS the re-review request. Chuck is RETIRED: never tag @chuck-noland-cartage, never poll for chuck-noland[bot] comments. Devin (devin-ai-integration[bot]) and Codex post normal GitHub Review objects with inline comments (\`pulls/<PR>/comments\`). Repos with \`.github/workflows/arbiter.yml\` (e.g. cartage-agent) also get a REQUIRED \`arbiter\` commit status synthesizing reviewers + CI — poll THAT on the head sha: \`gh api repos/{owner}/{repo}/commits/<head-sha>/status --jq '.statuses[] | select(.context==\"arbiter\")'\`. Poll with \`sleep 90\` between checks, up to 10 attempts (~15 min). success (approve) → done. failure (block) → address EVERY Arbiter blocking finding plus Devin/Codex inline comments directly on the PR branch: fix, commit, push (the push re-reviews automatically), poll the new head sha. needs-human → stop and report; a human must release it. A finding you judge wrong → one-line rebuttal in the final report, never a PR comment. Never post findings or replies to the PR conversation yourself (\`gh pr review --comment\` or any other \`gh\` write). Repo without arbiter.yml → the bar is PR opened + Devin/Codex findings addressed. Repo has no reviewer per repo policy → skip the loop."
 
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
