@@ -555,6 +555,8 @@ JSON
 
 review_rule="The lane OWNS its review feedback loop end-to-end, and it is the DEVIN loop. Tagging @devin-ai-integration in a PR comment does NOT trigger a review — use the local wrapper script (it handles auth internally; never source .env.local or touch the API key yourself): (1) after the PR opens — and after EVERY subsequent push of fixes — trigger: \`~/.claude/scripts/devin-review.sh trigger \"<full PR url>\"\` (409 = already in flight, just poll); make the trigger inseparable from the push — one compound command: git push && the trigger call, since a poll started before a push never covers the new sha. (2) Poll: \`~/.claude/scripts/devin-review.sh status \"<full PR url>\"\` — status pending|running|completed|errored|cancelled, \`sleep 90\` between checks, up to 10 attempts (~15 min) per round; 404 right after a push = not triggered, go back to (1). (3) On completed, the verdict is in the CONTENT: Devin (devin-ai-integration[bot]) posts a GitHub Review (always state COMMENTED — it never emits APPROVED) with inline comments in \`pulls/<PR>/comments\`. New blocking findings → address EVERY finding (plus any Codex findings) directly on the PR branch: fix, commit, push, back to (1). (4) The loop ends ONLY on: completed on the current head sha with ZERO new blocking findings, or the needs-human-review label landing on the PR → stop and report, a human must release it. errored/cancelled → re-trigger once, twice → lane-pause. Repos with \`.github/workflows/arbiter.yml\` (e.g. cartage-agent) also carry a REQUIRED \`arbiter\` commit status (approve=success; a push resets it to pending) — where it exists, arbiter=success on the final sha is ALSO required: \`gh api repos/{owner}/{repo}/commits/<head-sha>/status --jq '.statuses[] | select(.context==\"arbiter\")'\`. Chuck is RETIRED: never tag @chuck-noland-cartage, never poll for chuck-noland[bot] comments. A finding you judge wrong → one-line rebuttal in the final report, never a PR comment. Never post findings or replies to the PR conversation yourself (\`gh pr review --comment\` or any other \`gh\` write). Repo has no reviewer per repo policy → skip the loop."
 
+test_rule="Test runs are SCOPED to the files your slice touches — NEVER a repo-wide or suite-level run (\`bun run test:wilson\`, bare \`bun test\` with no path, \`test:all\`, or equivalents): those burn real LLM API spend and wall-clock for coverage CI already owns. Targeted paths only; pre-existing failures outside your slice are not yours to chase."
+
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]]; then
@@ -573,12 +575,12 @@ if [[ "$mode" == "single" ]]; then
 
   initial=""
   if [[ -n "$ticket_file" ]]; then
-    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass; the brief was sharpened in /scope, do not re-grill. Every behavior-changing slice: invoke the tdd skill via the Skill tool (red-green-refactor) — write the failing test first, then make it pass; do not freestyle the loop from memory. Per slice: type-check + tests (use the project's test command), commit per layer (schema → backend → frontend). ${harness_rule} After the final slice, run /ship to open the PR and trigger review. ${review_rule} ${stop_rule} No inter-slice confirmation."
+    initial="Autonomous mode. Brief at ${ticket_file}. Read it. Plan slices inline — no separate scoping pass; the brief was sharpened in /scope, do not re-grill. Every behavior-changing slice: invoke the tdd skill via the Skill tool (red-green-refactor) — write the failing test first, then make it pass; do not freestyle the loop from memory. Per slice: type-check + tests, commit per layer (schema → backend → frontend). ${test_rule} ${harness_rule} After the final slice, run /ship to open the PR and trigger review. ${review_rule} ${stop_rule} No inter-slice confirmation."
   elif [[ -f "$HOME/.claude/plans/${plan_slug}.md" ]]; then
     # No ticket brief, but a plan exists (e.g. /address-feedback writes
     # ~/.claude/plans/PR-<num>-feedback.md). Drive the lane off the plan.
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. ${harness_rule} Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} ${stop_rule}"
+    initial="Autonomous mode. Plan at ${plan}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. ${test_rule} ${harness_rule} Follow the plan's Done-when for shipping — \`/ship\`, or \`/ship <PR#>\` to re-review an existing PR. ${review_rule} ${stop_rule}"
   elif [[ -n "$ticket" ]]; then
     initial="Autonomous mode. No brief found for ${ticket} — and no plan at ~/.claude/plans/${plan_slug}.md. Tell the user to /scope it first, then stop. Do not invent a brief."
   fi
@@ -616,7 +618,7 @@ case "$parse_rc" in
     wt_path="$wt_dir/$slug"
     branch="${type_prefix}/${slug}"
     plan="$HOME/.claude/plans/${plan_slug}.md"
-    initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. ${harness_rule} After the final slice, run /ship. ${review_rule} ${stop_rule}"
+    initial="Autonomous mode. Plan at ${plan}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. ${test_rule} ${harness_rule} After the final slice, run /ship. ${review_rule} ${stop_rule}"
     spawn_lane "$slug" "$branch" "$wt_path" "$initial" "$ticket"
     exit 0
     ;;
@@ -766,6 +768,6 @@ for i in "${spawn_idx[@]}"; do
   s_branch="${branches[$i]}"
   s_slug="${slug}-${s_id}"
   s_wt="$wt_dir/${s_slug}"
-  s_initial="Autonomous mode, DAG slice. Plan at ${plan_path}. Implement slice ${s_id} (${s_name}) only. Per-layer commits, run type-check + tests. After the slice is committed and pushed, STOP — do not run /ship and do not start another slice. The DAG resolver (\`wt --resolve ${ticket}\`) will re-spawn the next ready set after this slice merges. ${review_rule}"
+  s_initial="Autonomous mode, DAG slice. Plan at ${plan_path}. Implement slice ${s_id} (${s_name}) only. Per-layer commits, run type-check + tests. ${test_rule} After the slice is committed and pushed, STOP — do not run /ship and do not start another slice. The DAG resolver (\`wt --resolve ${ticket}\`) will re-spawn the next ready set after this slice merges. ${review_rule}"
   spawn_lane "$s_slug" "$s_branch" "$s_wt" "$s_initial" "${ticket}-${s_id}"
 done
