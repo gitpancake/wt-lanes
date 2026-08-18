@@ -352,19 +352,16 @@ spawn_lane() {
   # WT_AGENT_CMD='pi ...' override (tix sets it per ticket root).
   local agent_cmd="${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}"
 
-  # Ultracode by default (Claude lanes): prepend the literal "ultracode" keyword
-  # to the kickoff + resume prompts so every lane turn opts into multi-agent
-  # Workflow orchestration. A lane runs as one long agentic turn, so the
-  # per-turn keyword covers it; the harness exposes no settings.json/CLI/env
-  # lever for ultracode, and the agent can't self-invoke `/effort ultracode` as
-  # a tool. WT_ULTRACODE=0 opts a lane out. Pi lanes and prompt-less raw spawns
-  # are untouched. Done before the dry-run banner so --dry-run shows the real
-  # kickoff.
+  # Ultracode by default (Claude lanes): session-level via `--effort ultracode`
+  # (claude 2.1.203+; absent from --help but real). The old keyword-prepend
+  # never fired the harness opt-in — CLI-arg prompts count as
+  # non-human-originated input since 2.1.210, verified: zero opt-in reminders
+  # across all lane transcripts. Appending to agent_cmd (not env) survives
+  # tmux's env scrubbing and covers lane-run.sh respawns. WT_ULTRACODE=0 opts
+  # a lane out. Pi lanes untouched.
   local s_resume="${resume_template:-}"
   if [[ "${WT_ULTRACODE:-1}" != "0" && "$agent_cmd" == *claude* ]]; then
-    local uc="ultracode: run this lane in ultracode mode — for substantive slices, default to authoring and running a multi-agent Workflow (decompose → fan out → adversarially verify) over doing everything inline; stay solo only for trivial mechanical edits. "
-    [[ -n "$s_initial" ]] && s_initial="${uc}${s_initial}"
-    [[ -n "$s_resume" ]] && s_resume="${uc}${s_resume}"
+    agent_cmd="$agent_cmd --effort ultracode"
   fi
 
   if [[ "${WT_DRY_RUN:-}" == "1" ]]; then
