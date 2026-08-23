@@ -49,6 +49,37 @@ doc_file="$wt_path/.claude/handoff-doc"
 
 cd "$wt_path" || exit 1
 
+# Lanes that ship cleanly keep forgetting lane-done.sh as their final tool
+# call, so the session ends IDLE and a finished lane is indistinguishable from
+# a crashed one (2026-08-23: ENGH-867/868/873, three-for-three). On exit with
+# no handoff pending and no WAITING tag: if the lane's PR is merged, or an open
+# PR's local HEAD sha carries arbiter success, stamp DONE for it. Network or
+# gh failure → leave the state alone; this only upgrades certainty, never
+# invents it.
+finalize_if_shipped() {
+  local state branch merged sha repo arb
+  state=$(head -n1 "$wt_path/.claude/agent-state" 2>/dev/null || true)
+  case "$state" in DONE*|WAITING*|HANDOFF*) return 0 ;; esac
+  command -v gh >/dev/null 2>&1 || return 0
+  branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
+  [[ -n "$branch" ]] || return 0
+
+  merged=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
+  if [[ "${merged:-0}" -ge 1 ]]; then
+    "$HOME/.claude/scripts/lane-done.sh"
+    return 0
+  fi
+
+  [[ "$(gh pr list --head "$branch" --state open --json number --jq 'length' 2>/dev/null)" -ge 1 ]] || return 0
+  sha=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)
+  repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+  [[ -n "$sha" && -n "$repo" ]] || return 0
+  arb=$(gh api "repos/$repo/commits/$sha/status" \
+    --jq '[.statuses[] | select(.context == "arbiter")][0].state' 2>/dev/null)
+  [[ "$arb" == "success" ]] && "$HOME/.claude/scripts/lane-done.sh"
+  return 0
+}
+
 respawns=0
 while :; do
   if [[ -n "$prompt" ]]; then
@@ -58,7 +89,10 @@ while :; do
   fi
 
   doc=$(head -n1 "$doc_file" 2>/dev/null || true)
-  [[ -n "$doc" ]] || exit 0
+  if [[ -z "$doc" ]]; then
+    finalize_if_shipped
+    exit 0
+  fi
   [[ -n "$resume_template" ]] || exit 0
 
   rm -f "$doc_file"

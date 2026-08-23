@@ -64,6 +64,17 @@ write_state() {
   local dir="${CLAUDE_PROJECT_DIR:-$PWD}"
   [[ -z "$dir" ]] && return 0
 
+  # Lane fast path: an unchanged state re-written within 30s is a no-op for
+  # every consumer (board reads content, staleness is judged in days), but the
+  # full write path costs a pid walk (up to 5 `ps` forks) per tool call —
+  # thousands of forks per lane session on Bash-heavy work. Skip it; the next
+  # state CHANGE, or 30s of same-state heartbeat, still writes through.
+  if [[ "$dir" == */.claude/worktrees/* && "$(head -n1 "$dir/.claude/agent-state" 2>/dev/null)" == "$state" ]]; then
+    local state_mtime
+    state_mtime=$(stat -f %m "$dir/.claude/agent-state" 2>/dev/null || echo 0)
+    (( $(date +%s) - state_mtime < 30 )) && return 0
+  fi
+
   local claude_pid
   claude_pid=$(_find_claude_pid) || claude_pid=""
 

@@ -39,7 +39,7 @@ template='resume {N}/{MAX} doc={DOC}'
 #    consumed by the respawn.
 printf 'HANDOFF:%s\n' "$doc" > "$TEST_TMP/state.1"
 printf '%s\n' "$doc" > "$TEST_TMP/sentinel.1"
-"$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
+WT_MAX_RESPAWNS=3 "$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
 assert_eq "respawned once then stopped" "$(wc -l < "$calls" | tr -d ' ')" "2"
 assert_contains "resume prompt substituted" "$(tail -n1 "$calls")" "resume 1/3 doc=$doc"
 assert_eq "final state DONE" "$(cat "$wt/.claude/agent-state")" "DONE"
@@ -48,7 +48,7 @@ assert_eq "sentinel consumed" "$(cat "$wt/.claude/handoff-doc" 2>/dev/null || ec
 # 2) terminal pause state, no sentinel -> no respawn.
 reset
 printf 'WAITING:review:PR pending\n' > "$TEST_TMP/state.1"
-"$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
+WT_MAX_RESPAWNS=3 "$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
 assert_eq "no respawn on WAITING" "$(wc -l < "$calls" | tr -d ' ')" "1"
 
 # 3) empty resume template (Pi lanes) -> no respawn even with a sentinel.
@@ -64,7 +64,7 @@ assert_eq "no respawn without template" "$(wc -l < "$calls" | tr -d ' ')" "1"
 reset
 printf 'ACTIVE:Bash\n' > "$TEST_TMP/state.1"
 printf '%s\n' "$doc" > "$TEST_TMP/sentinel.1"
-"$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
+WT_MAX_RESPAWNS=3 "$LANE_RUN" "$wt" "$agent" "kickoff" "$template" >/dev/null
 assert_eq "respawn despite clobbered state" "$(wc -l < "$calls" | tr -d ' ')" "2"
 assert_contains "clobbered-state resume prompt" "$(tail -n1 "$calls")" "resume 1/3 doc=$doc"
 
