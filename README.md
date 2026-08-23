@@ -26,6 +26,8 @@ The pieces:
 | `wt-gc` | Reaper. Cleans up lanes whose worktree is gone or whose agent pid is dead. |
 | `agent-board` | The status board. Reads every lane's `agent-state` file, renders one row per lane, color-coded. Pin it in a tmux pane. |
 | `lane-watch` | Per-lane monitor pane. Renders one lane's state + git status. Attached automatically by `wt`. |
+| `lane-paint` | Tab painter. Colours each lane's tmux tab by state, so a lane that is blocked on you is visible from any window without opening anything. |
+| `lane-menu` | Jump menu (`prefix + a`). Every live lane, sorted blockers-first, with the reason it stopped; pick one to jump straight to it. `prefix + b` goes to the next blocked lane. |
 | `lane-pause` | Manual state writer. Call from inside a lane to record why you've paused (`review`, `ambiguity`, `creds`, etc.). |
 | Hooks | `agent-state-active`, `agent-state-idle`, `agent-state-waiting`, `precheck-stop` — optional legacy Claude Code hooks that keep the state file in sync with what the agent is actually doing. |
 
@@ -64,6 +66,26 @@ Open the status board:
 # or one-shot:
 ~/.tmux/agent-board.sh
 ```
+
+Or skip the board entirely. Lane tabs carry their own state, so you never have
+to walk `prefix + <number>` through them to find out who needs you:
+
+| Tab colour | Meaning |
+|---|---|
+| red | Blocked on you — `ambiguity`, `creds`, `input`, `test-loop`, `merge-conflict`, `scope`, `verify`, or a failed precheck |
+| yellow | Blocked on something external (`external`), or handed off mid-respawn |
+| blue | Expected pause — waiting on PR review |
+| green | Done |
+| default | Working, or idle |
+
+```bash
+# prefix + a   the jump menu: every lane, blockers first, with why it stopped
+# prefix + b   jump to the next blocked lane
+```
+
+Switching to a lane's tab acknowledges it and the colour clears, so a tab you
+have already dealt with is not still lit on the way out. It lights again when
+that lane blocks on something new.
 
 ## The state machine
 
@@ -110,6 +132,7 @@ wt-lanes/
 ├── scripts/              called by absolute path from wt + hooks
 │   ├── lane-watch.sh     per-lane monitor pane
 │   ├── lane-pause.sh     manual state writer
+│   ├── lane-paint.sh     colours a lane's tmux tab by state
 │   └── dag-parse.sh      DAG-mode plan parser
 ├── hooks/                Claude Code hooks
 │   ├── _state-write.sh   shared helper (routes lane vs cockpit, atomic writes)
@@ -119,11 +142,13 @@ wt-lanes/
 │   └── precheck-stop.sh
 ├── share/
 │   ├── agent-state-vocab.md   reason-code vocab (human docs)
-│   └── state-codes.sh         reason-code vocab (machine source of truth)
+│   ├── state-codes.sh         reason-code vocab (machine source of truth)
+│   └── lane-windows.sh        tab palette, state→class, window↔worktree lookup
 ├── tests/                     dependency-free bash suite — tests/run.sh
 ├── tmux/
 │   ├── agent-board.py         the status board
-│   └── agent-board.sh         thin launcher (installed path contract)
+│   ├── agent-board.sh         thin launcher (installed path contract)
+│   └── lane-menu.sh           the lane jump menu
 ├── install.sh
 └── uninstall.sh
 ```

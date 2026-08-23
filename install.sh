@@ -8,7 +8,9 @@
 #   scripts/*               →  ~/.claude/scripts/           (called by absolute path)
 #   hooks/*                 →  ~/.claude/hooks/             (registered in settings.json)
 #   share/agent-state-vocab →  ~/.claude/agent-state-vocab.md
+#   share/lane-windows.sh   →  ~/.claude/lane-windows.sh    (tab palette + lookup)
 #   tmux/agent-board.sh     →  ~/.tmux/agent-board.sh       (pinned status board)
+#   tmux/lane-menu.sh       →  ~/.tmux/lane-menu.sh         (lane jump menu)
 #
 # Then prints the Claude Code hook registration block to merge into
 # ~/.claude/settings.json, plus a tmux snippet for the agent-board pane.
@@ -76,9 +78,11 @@ done
 # share
 link "$REPO_DIR/share/agent-state-vocab.md" "$HOME/.claude/agent-state-vocab.md"
 link "$REPO_DIR/share/state-codes.sh" "$HOME/.claude/state-codes.sh"
+link "$REPO_DIR/share/lane-windows.sh" "$HOME/.claude/lane-windows.sh"
 
-# tmux agent-board
+# tmux agent-board + lane jump menu
 link "$REPO_DIR/tmux/agent-board.sh" "$HOME/.tmux/agent-board.sh"
+link "$REPO_DIR/tmux/lane-menu.sh" "$HOME/.tmux/lane-menu.sh"
 
 cat <<'POST'
 
@@ -108,9 +112,18 @@ Two manual steps remain — these touch files wt-lanes shouldn't auto-edit:
    Add to ~/.tmux.conf (or run as an interactive tmux command):
 
        bind A new-window -n agent-board 'watch -tcn2 ~/.tmux/agent-board.sh'
+       bind a run-shell '~/.tmux/lane-menu.sh #{pane_id}'
+       bind b run-shell '~/.tmux/lane-menu.sh --next'
+
+   The after-select-window hook clears a lane's flag the moment you switch to
+   its tab, instead of leaving it lit until that lane's next hook fires:
+
+       set-hook -g after-select-window 'run-shell -b "~/.claude/scripts/lane-paint.sh --ack #{window_id}"'
 
    Reload tmux config:  tmux source-file ~/.tmux.conf
    Open the board:      prefix + A
+   Jump to a lane:      prefix + a
+   Next blocked lane:   prefix + b
 
 [smoke test]
    wt --help

@@ -59,6 +59,7 @@ state_file="$dir/.claude/agent-state"
 # Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
 tmp="$state_file.tmp.$$"
 printf 'HANDOFF:%s\n' "$doc" > "$tmp" && mv -f "$tmp" "$state_file"
+"$HOME/.claude/scripts/lane-paint.sh" "$dir" 2>/dev/null || true
 
 case "$dir" in
   */.claude/worktrees/*) ;;

@@ -21,7 +21,10 @@ for f in "$REPO_DIR"/bin/*;     do [[ -e "$f" ]] && unlink_if_ours "$HOME/.local
 for f in "$REPO_DIR"/scripts/*; do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claude/scripts/$(basename "$f")"; done
 for f in "$REPO_DIR"/hooks/*;   do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claude/hooks/$(basename "$f")";   done
 unlink_if_ours "$HOME/.claude/agent-state-vocab.md"
+unlink_if_ours "$HOME/.claude/state-codes.sh"
+unlink_if_ours "$HOME/.claude/lane-windows.sh"
 unlink_if_ours "$HOME/.tmux/agent-board.sh"
+unlink_if_ours "$HOME/.tmux/lane-menu.sh"
 
 cat <<'POST'
 
@@ -29,6 +32,7 @@ cat <<'POST'
 
 Manual cleanup still needed (this script does not edit your settings):
   - Remove the hook registrations from ~/.claude/settings.json
-  - Remove the `bind A new-window …` line from ~/.tmux.conf
+  - Remove the `bind A`, `bind a`, `bind b`, and `set-hook -g
+    after-select-window` lines from ~/.tmux.conf
   - Restart Claude Code sessions
 POST

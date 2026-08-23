@@ -18,6 +18,16 @@ printf 'DONE\n' > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
 # A finished lane must never respawn off an earlier handoff in this session.
 rm -f "$dir/.claude/handoff-doc"
 
+# Shared palette, so the steady green a finished lane keeps is the same green
+# `lane-paint.sh --all` would repaint it. Guarded — an older install without
+# lane-windows.sh must still mark the lane DONE.
+green='fg=#1d2021,bg=#a9b665,bold'
+if [[ -f "$HOME/.claude/lane-windows.sh" ]]; then
+  source "$HOME/.claude/lane-windows.sh"
+  green=$(lane_class_style done)
+  printf 'done\n' > "$dir/.claude/tmux-paint" 2>/dev/null || true
+fi
+
 [[ -z "${TMUX:-}" ]] && exit 0
 
 win=""
@@ -31,7 +41,6 @@ if [[ -z "$win" && -f "$dir/.claude/tmux-window" ]]; then
 fi
 [[ -z "$win" ]] && exit 0
 
-green='fg=colour232,bg=colour46,bold'
 (
   i=0
   while [[ $i -lt 6 ]]; do

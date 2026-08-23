@@ -49,6 +49,10 @@ esac
 put_state() {
   local tmp="$state_file.tmp.precheck.$$"
   printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$state_file"
+  # FAILED must reach the tab bar: a red tab is the whole point of a lane
+  # whose typecheck just broke. Spawned rather than sourced — this runs in a
+  # detached worker that already paid for a full precheck.
+  "$HOME/.claude/scripts/lane-paint.sh" "$dir" 2>/dev/null || true
 }
 
 # Kill any previously running precheck for this project.

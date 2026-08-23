@@ -25,6 +25,12 @@ Three roles in the system:
    and `scripts/lane-watch.sh` read the state file and render. One sanctioned
    write: the board's stale-reap resets ACTIVE/WAITING/RUNNING to IDLE when
    the recorded agent pid is dead (writer crashed without firing Stop).
+   `scripts/lane-paint.sh` and `tmux/lane-menu.sh` are the *ambient* consumers:
+   the painter colours each lane's tmux tab by state so a blocker is visible
+   without visiting the tab, and the menu (`prefix + a`) lists every lane
+   blockers-first and jumps straight to one. Both resolve lanes through
+   `share/lane-windows.sh`, which owns the tab palette, the state→class
+   mapping, and the pane-cwd lookup from tmux window to worktree.
 
 ## Invariants
 
@@ -52,6 +58,16 @@ Three roles in the system:
 5. **Cockpit is a structural concept.** The agent-board has a LANES
    section (worktree-backed) and a COCKPIT section (live Claude sessions
    outside worktrees). The two are distinct rendering paths — don't merge.
+
+6. **Painting is a side effect, never a state write.** Every writer calls
+   into `lane_paint_one` (hooks, sourced — no extra process per tool call) or
+   `scripts/lane-paint.sh` (detached writers). None of them may touch
+   agent-state; the painter only sets tmux styles and its own
+   `<wt>/.claude/tmux-paint` cache. That cache holds what the tab is currently
+   *showing*, which is not the same as the lane's state: switching to a tab
+   writes `ack:<class>`, so a flag you have already looked at stays clear until
+   the lane's state genuinely moves on. Adding a state to the vocab means
+   giving it a class in `lane_class`, or it silently classifies as idle.
 
 ## Coupling boundaries
 

@@ -21,6 +21,14 @@
 
 WT_SESSIONS_DIR="$HOME/.claude/wt-sessions"
 
+# Tab painting rides along with the write so a lane's tmux tab turns red the
+# moment it blocks on you. Sourced, not spawned: an unchanged state class
+# returns before tmux is forked, so the per-tool-call path stays fork-free.
+# Guarded — an older install without lane-windows.sh must still write state.
+if [[ -f "$HOME/.claude/lane-windows.sh" ]]; then
+  source "$HOME/.claude/lane-windows.sh"
+fi
+
 _atomic_write() {
   local path=$1 content=$2 tmp="$1.tmp.$$"
   printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -71,6 +79,7 @@ write_state() {
       # doesn't trust it.
       rm -f "$dir/.claude/agent-pid"
     fi
+    type lane_paint_one >/dev/null 2>&1 && lane_paint_one "$dir"
     return 0
   fi
 
