@@ -54,7 +54,10 @@
 #   - Per-lane port stamped in .env.local.port (3100 + lane index)
 #   - .claude/agent-state seeded as IDLE (visible to agent-board)
 #   - In tmux: opens new window running pi, with optional initial prompt
-#   - Outside tmux: prints the path so you can cd in manually
+#   - Outside tmux (agent Bash tools land here): opens the window in the `wt`
+#     session and links it into the attached session so it shows up in the
+#     user's cockpit. Opt out w/ WT_NO_LINK=1.
+#   - No tmux at all: prints the path so you can cd in manually
 
 set -euo pipefail
 
@@ -514,11 +517,11 @@ JSON
     esac
   elif command -v tmux >/dev/null 2>&1; then
     # Not inside tmux. Target a dedicated `wt` session (override w/
-    # WT_TMUX_SESSION). Predictable home for lane windows — no alphabetical
-    # guessing, no pollution of the user's cockpit session. Create the session
-    # if missing, else attach a new window to it. Stops callers (orchestrator
-    # agents) from improvising with nohup, which detaches the process from
-    # any pane and loses scrollback.
+    # WT_TMUX_SESSION) as the lane's permanent home — one predictable address,
+    # no alphabetical guessing. The block below then links it into the user's
+    # cockpit for visibility. Create the session if missing, else attach a new
+    # window to it. Stops callers (orchestrator agents) from improvising with
+    # nohup, which detaches the process from any pane and loses scrollback.
     local target_sess="${WT_TMUX_SESSION:-wt}"
     if tmux has-session -t "$target_sess" 2>/dev/null; then
       tmux new-window -t "$target_sess" -n "$s_label" -c "$s_wt" "$lane_cmd"
@@ -531,6 +534,25 @@ JSON
       tmux split-window -t "$target_sess:$s_label" -h -p 35 -c "$s_wt" "$watch_cmd"
       tmux select-pane -t "$target_sess:$s_label" -L 2>/dev/null || true
       echo "    Monitor pane attached (lane-watch)."
+    fi
+    # Mirror the lane into whatever session the user is actually attached to
+    # (opt out: WT_NO_LINK=1). link-window SHARES one window between sessions
+    # rather than moving it, so "$target_sess:$s_label" stays addressable and
+    # lane-done.sh's window-id lookup is unaffected. Without this, a lane
+    # spawned by an agent — whose Bash tool runs outside tmux, so the branch
+    # above always fires — lands in a session nobody is watching.
+    if [[ "${WT_NO_LINK:-0}" != "1" ]]; then
+      local client_sess next_idx
+      client_sess=$(tmux list-clients -F '#{client_session}' 2>/dev/null \
+        | grep -vx "$target_sess" | head -1 || true)
+      if [[ -n "$client_sess" ]]; then
+        next_idx=$(tmux list-windows -t "$client_sess" -F '#{window_index}' 2>/dev/null \
+          | sort -n | tail -1 || true)
+        next_idx=$(( ${next_idx:-0} + 1 ))
+        if tmux link-window -s "$target_sess:$s_label" -t "$client_sess:$next_idx" 2>/dev/null; then
+          echo "    Linked into attached session '$client_sess' as window $next_idx."
+        fi
+      fi
     fi
     echo "    Attach: tmux attach -t $target_sess"
     echo "  worktree: $s_wt"
