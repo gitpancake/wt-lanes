@@ -243,4 +243,8 @@ for root in "${ROOTS[@]}"; do
   done
 done
 
+if (( considered == 0 )); then
+  log "WARN considered=0 — no lanes visible under ${ROOTS[*]}. If run from launchd, /bin/bash likely lacks Full Disk Access (TCC blocks ~/Documents); grant it in System Settings or run wt-gc from a terminal."
+  echo "wt-gc: WARN no lanes visible (TCC?) — see ~/.claude/logs/wt-gc.log" >&2
+fi
 log "DONE considered=$considered removed=$removed skipped=$skipped notified=$notified threshold=${THRESHOLD_HOURS}h notify_dirty=${NOTIFY_DIRTY_HOURS}h reap_merged=$REAP_MERGED dry_run=$DRY_RUN force=$FORCE"

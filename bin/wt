@@ -351,6 +351,12 @@ spawn_lane() {
   local s_slug=$1 s_branch=$2 s_wt=$3 s_initial=$4
   local s_label="${5:-$s_slug}"
 
+  # Opportunistic reap from a TCC-granted shell: the launchd wt-gc job cannot
+  # read ~/Documents (Operation not permitted) and silently considers 0 lanes.
+  if [[ -z "${WT_SKIP_GC:-}" ]] && command -v wt-gc >/dev/null 2>&1; then
+    wt-gc --quiet --hours 24 >/dev/null 2>&1 || true
+  fi
+
   # Default agent = Claude via claude-lane ($WT_CLAUDE). Pi only on explicit
   # WT_AGENT_CMD='pi ...' override (tix sets it per ticket root).
   local agent_cmd="${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}"
