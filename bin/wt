@@ -39,9 +39,12 @@
 #   WT_TYPE=          branch type prefix (default: feature)
 #   WT_BASE=          base ref for new lane branches (same as --base)
 #   WT_NO_FETCH=1     skip pre-spawn fetch + ff
+#   WT_NO_DEPS=1      skip node_modules provisioning (lane installs its own)
 #   WT_LAYOUT=        pane|window|session (default: window)
 #   WT_AGENT_CMD='pi ...' full launch command override
-#   WT_ULTRACODE=0    opt a Claude lane out of ultracode mode (default: on)
+#   WT_ULTRACODE=1    opt a Claude lane INTO ultracode mode (default: off since
+#                     2026-09-10 — xhigh thinking is retained across the lane's
+#                     single mega-turn, ~35% of ctx growth, and it licenses fan-out)
 #   WT_PI_MODEL=openai-codex/gpt-5.5  Pi model override
 #   WT_DRY_RUN=1      DAG mode only — print what would spawn, don't actually
 #   WT_DAG=1          equivalent to --dag flag
@@ -52,6 +55,9 @@
 #     cockpit IS the default branch; --base/WT_BASE overrides; skipped if the
 #     branch already exists
 #   - Per-lane port stamped in .env.local.port (3100 + lane index)
+#   - node_modules provisioned from the cockpit: symlinked for a plain repo,
+#     APFS-cloned for a bun workspace, plus `bun install` when the lane's
+#     lockfile differs. Opt out w/ WT_NO_DEPS=1.
 #   - .claude/agent-state seeded as IDLE (visible to agent-board)
 #   - In tmux: opens new window running pi, with optional initial prompt
 #   - Outside tmux (agent Bash tools land here): opens the window in the `wt`
@@ -345,6 +351,66 @@ layout="${WT_LAYOUT:-window}"
 # claude process hasn't booted yet (DAG mode spawns several back-to-back).
 spawned_this_run=0
 
+# ---- dependency provisioning ----------------------------------------------
+# node_modules is gitignored, so `git worktree add` checks out zero deps and the
+# lane pays a cold install. Two shapes, because they fail differently:
+#   plain repo    -> symlink the cockpit's tree. Resolution already walks up to
+#                    it for worktrees nested under the repo; the link makes that
+#                    explicit and also covers off-repo worktrees.
+#   bun workspace -> needs a real tree: root node_modules/<pkg> entries symlink
+#                    to workspace sources, so a shared tree makes the lane import
+#                    the COCKPIT's source instead of its own branch. `cp -c` is an
+#                    APFS clone (copy-on-write), so N lanes cost ~one tree on disk.
+# A lane whose lockfile differs from the cockpit's always gets its own tree plus a
+# real install -- never a symlink, which would write through into the cockpit's
+# node_modules. Opt out entirely with WT_NO_DEPS=1.
+provision_deps() {
+  local repo=$1 wt=$2
+
+  if [[ "${WT_NO_DEPS:-0}" == "1" ]]; then return 0; fi
+  if [[ -e "$wt/node_modules" ]]; then return 0; fi
+  if [[ ! -f "$wt/package.json" || ! -d "$repo/node_modules" ]]; then return 0; fi
+
+  local lock="" candidate
+  for candidate in bun.lock bun.lockb package-lock.json pnpm-lock.yaml yarn.lock; do
+    if [[ -f "$wt/$candidate" && -f "$repo/$candidate" ]]; then lock=$candidate; break; fi
+  done
+
+  local stale_lock=0 needs_own_tree=0
+  if [[ -n "$lock" ]] && ! cmp -s "$repo/$lock" "$wt/$lock"; then stale_lock=1; fi
+  if grep -q '"workspaces"' "$repo/package.json"; then needs_own_tree=1; fi
+  if (( stale_lock )); then needs_own_tree=1; fi
+
+  if (( ! needs_own_tree )); then
+    ln -s "$repo/node_modules" "$wt/node_modules"
+    echo "  deps:     linked -> $repo/node_modules"
+    return 0
+  fi
+
+  if ! cp -c -R "$repo/node_modules" "$wt/node_modules" 2>/dev/null; then
+    cp -R "$repo/node_modules" "$wt/node_modules" 2>/dev/null || true
+  fi
+
+  # Workspace packages carry their own node_modules (bin shims, hoist-exempt
+  # deps); the root tree alone leaves those broken.
+  local nested rel
+  while IFS= read -r nested; do
+    rel=${nested#"$repo"/}
+    if [[ -d "$wt/${rel%/node_modules}" && ! -e "$wt/$rel" ]]; then
+      cp -c -R "$nested" "$wt/$rel" 2>/dev/null || cp -R "$nested" "$wt/$rel" 2>/dev/null || true
+    fi
+  done < <(find "$repo" -mindepth 2 -maxdepth 3 -type d -name node_modules \
+             -not -path "$repo/node_modules/*" -not -path "$repo/.claude/*" 2>/dev/null || true)
+
+  if (( ! stale_lock )); then
+    echo "  deps:     cloned from cockpit (APFS CoW)"
+    return 0
+  fi
+
+  echo "  deps:     cloned + reconciling ($lock differs from cockpit)"
+  ( cd "$wt" && bun install >/dev/null 2>&1 ) || true
+}
+
 # ---- lane spawn helper -----------------------------------------------------
 # Args: <slug> <branch> <wt_path> <initial-prompt-or-empty> [tmux-label]
 spawn_lane() {
@@ -361,15 +427,15 @@ spawn_lane() {
   # WT_AGENT_CMD='pi ...' override (tix sets it per ticket root).
   local agent_cmd="${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}"
 
-  # Ultracode by default (Claude lanes): session-level via `--effort ultracode`
-  # (claude 2.1.203+; absent from --help but real). The old keyword-prepend
-  # never fired the harness opt-in — CLI-arg prompts count as
-  # non-human-originated input since 2.1.210, verified: zero opt-in reminders
-  # across all lane transcripts. Appending to agent_cmd (not env) survives
-  # tmux's env scrubbing and covers lane-run.sh respawns. WT_ULTRACODE=0 opts
-  # a lane out. Pi lanes untouched.
+  # Ultracode is OPT-IN (WT_ULTRACODE=1) since 2026-09-10. A lane's whole brief
+  # is one user turn, so every xhigh thinking block stays in context: the 3-day
+  # audit of 272 lane sessions put ~35% of ctx growth on retained thinking, and
+  # the ultracode reminder is what licensed 9-parallel-fork dispatch on one
+  # worktree. Session-level via `--effort ultracode` (claude 2.1.203+; absent
+  # from --help but real); appended to agent_cmd (not env) so it survives
+  # tmux's env scrubbing and lane-run.sh respawns. Pi lanes untouched.
   local s_resume="${resume_template:-}"
-  if [[ "${WT_ULTRACODE:-1}" != "0" && "$agent_cmd" == *claude* ]]; then
+  if [[ "${WT_ULTRACODE:-0}" == "1" && "$agent_cmd" == *claude* ]]; then
     agent_cmd="$agent_cmd --effort ultracode"
   fi
 
@@ -424,6 +490,8 @@ spawn_lane() {
       git -C "$repo" worktree add "$s_wt" "$s_branch"
     fi
   fi
+
+  provision_deps "$repo" "$s_wt"
 
   # Per-lane port: stamp once. A reused worktree keeps the port it already has.
   # Allocate max(stamped sibling ports)+1, not 3099+dir-count — a dir count
@@ -585,7 +653,7 @@ test_rule="Test runs are SCOPED to the files your slice touches — NEVER a repo
 stop_rule="The lane is done ONLY when the PR is open AND all review feedback is addressed + pushed (or review skipped per repo policy). Then run \`~/.claude/scripts/lane-done.sh\` as your final tool call — it marks the lane DONE and flashes the tmux window green. Review never arrives within the poll window → \`lane-pause.sh review 'PR #<N> review pending'\` and stop; do NOT claim done. Genuine blocker (ambiguity not in the brief/plan, repeated test failure same root cause, missing credential) → stop and report."
 
 if [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]]; then
-  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra) via the Agent tool — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~240K context (a non-blocking nudge fires at 260K/320K/380K): if implementation is shipped and only the review loop remains, do NOT hand off — finish the loop (one poll + one feedback pass) and lane-done.sh. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / general-purpose / Explore) via the Agent tool with a WRITTEN prompt — never subagent_type fork (it inherits your whole context) and never a Workflow — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them. An Agent result of [Request interrupted by user for tool use] means the subagent was killed, not that it declined: git status, read what landed on disk, continue; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~240K context (a non-blocking nudge fires at 260K/320K/380K): if implementation is shipped and only the review loop remains, do NOT hand off — finish the loop (one poll + one feedback pass) and lane-done.sh. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
   resume_template="Autonomous mode, resumed after a context handoff ({N}/{MAX}). Run /resume with the handoff doc at {DOC} — it carries the lane state; re-read the brief it points to before acting. Continue the work end-to-end, including any pending review loop. Verification is CHEAP and FOREGROUND: \`bun type-check\` (~15s warm / ~45s cold) and scoped tests run as one plain foreground Bash command — never run_in_background, never piped into \`tail\`. Never kill build tools by pattern (pkill/killall) — it reaps sibling lanes' checks; kill only PIDs you spawned. A rebase that replays cleanly with no new code of yours since the last green check needs no local re-verify — push; CI's pr-checks re-runs the same type-check on every push. ${review_rule} ${stop_rule} If context forces another handoff: /handoff, then ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
