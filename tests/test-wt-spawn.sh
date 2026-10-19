@@ -30,6 +30,8 @@ mkdir -p "$TICKETS_DIR/area"
 printf -- '---\ntitle: My feature\n---\nbody\n' > "$TICKETS_DIR/area/my-feature.md"
 out=$(cd "$repo" && "$WT" my-feature)
 assert_contains "brief found -> brief-driven kickoff" "$out" "Brief at $TICKETS_DIR/area/my-feature.md"
+case "$out" in *" /ship "*|*" /ship."*|*" /scope "*) slash_token=bare ;; *) slash_token=quoted ;; esac
+assert_eq "kickoff quotes /ship and /scope (a bare token is a Claude Code skill mention and pre-arms the Skill tool)" "$slash_token" "quoted"
 
 out=$(cd "$repo" && "$WT" --branch feature/existing-pr my-feature)
 assert_contains "--branch overrides derived branch" "$out" "branch:   feature/existing-pr"
