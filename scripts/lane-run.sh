@@ -96,6 +96,10 @@ while :; do
   [[ -n "$resume_template" ]] || exit 0
 
   rm -f "$doc_file"
+  # A respawn is a FRESH session. An outage revive launches this runner with
+  # `--resume <id>`; replaying that verbatim reopened the same session on every
+  # handoff (2026-10-15: one lane ran to 760K ctx across three "handoffs").
+  agent_cmd=$(printf '%s' "$agent_cmd" | sed -E 's/[[:space:]]+(--resume|-r)[[:space:]]+[^[:space:]]+//g; s/[[:space:]]+--continue([[:space:]]|$)/\1/g')
   if (( respawns >= max_respawns )); then
     "$HOME/.claude/scripts/lane-pause.sh" input \
       "handoff respawn cap ($max_respawns) hit — /resume manually: $doc"

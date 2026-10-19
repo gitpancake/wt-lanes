@@ -88,4 +88,21 @@ assert_eq "cap: kickoff + 3 respawns" "$(wc -l < "$calls" | tr -d ' ')" "4"
 assert_contains "cap re-tags WAITING:input" "$(cat "$wt/.claude/agent-state")" "WAITING:input:handoff respawn cap"
 assert_eq "cap clears sentinel" "$(cat "$wt/.claude/handoff-doc" 2>/dev/null || echo none)" "none"
 
+# 6) an outage revive launches the runner with `--resume <id>` in agent_cmd.
+#    A respawn must drop it, or every "fresh" session reopens the same one.
+reset
+argv_agent="$TEST_TMP/argv-agent.sh"
+argv_calls="$TEST_TMP/argv-calls"
+cat > "$argv_agent" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$argv_calls"
+exec "$agent" "\${@: -1}"
+EOF
+chmod +x "$argv_agent"
+printf 'HANDOFF:%s\n' "$doc" > "$TEST_TMP/state.1"
+printf '%s\n' "$doc" > "$TEST_TMP/sentinel.1"
+WT_MAX_RESPAWNS=3 "$LANE_RUN" "$wt" "$argv_agent --resume abc-123 --continue" "kickoff" "$template" >/dev/null
+assert_contains "first spawn keeps --resume" "$(sed -n 1p "$argv_calls")" "--resume abc-123"
+assert_eq "respawn drops --resume/--continue" "$(sed -n '$p' "$argv_calls")" "resume 1/3 doc=$doc"
+
 finish
