@@ -18,6 +18,16 @@ printf 'DONE\n' > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
 # A finished lane must never respawn off an earlier handoff in this session.
 rm -f "$dir/.claude/handoff-doc"
 
+# Pre-ship review telemetry: the protocol caps reviewer rounds at 3. Surface a
+# breach where the cockpit reads it (stdout + a sidecar /worker-status picks up).
+if [[ -f "$dir/.claude/preship-rounds" ]]; then
+  rounds=$(head -n1 "$dir/.claude/preship-rounds" | tr -dc '0-9')
+  if [[ -n "$rounds" && "$rounds" -gt 3 ]]; then
+    printf 'WARN: pre-ship review ran %s rounds (cap 3) — protocol breach, see lane-protocol §Pre-ship\n' "$rounds"
+    printf '%s\n' "$rounds" > "$dir/.claude/preship-rounds.breach"
+  fi
+fi
+
 # Shared palette, so the steady green a finished lane keeps is the same green
 # `lane-paint.sh --all` would repaint it. Guarded — an older install without
 # lane-windows.sh must still mark the lane DONE.
