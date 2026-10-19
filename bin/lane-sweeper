@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# lane-sweeper — periodic reaper for runaway build processes inside wt lanes.
+#
+# Complements ~/.claude/hooks/lane-reaper.sh (SessionEnd, one lane). This one
+# runs on a timer across EVERY lane worktree and kills allowlisted build tools
+# that have gone runaway: burning CPU, hogging RSS, wedged past a deadline, or
+# orphaned by a dead lane agent.
+#
+# Safety model is allowlist-only: a process is a candidate solely because its
+# command matches KILL_RE below AND its cwd is inside a */.claude/worktrees/*
+# path. Anything else — claude, tmux, git, bun install, dev servers, the user's
+# editor — is never a candidate, at any resource level.
+#
+# Usage: lane-sweeper [--dry-run] [--quiet]
+#
+# Env knobs:
+#   LANE_SWEEP_MIN_AGE   seconds before resource gates apply     (default 600)
+#   LANE_SWEEP_MAX_AGE   seconds after which a proc dies anyway  (default 2700)
+#   LANE_SWEEP_CPU       %CPU threshold                          (default 80)
+#   LANE_SWEEP_RSS_MB    RSS threshold in MB                     (default 4096)
+#   LANE_SWEEP_ORPHAN_AGE seconds before an orphan is reaped        (default 60)
+
+set -u
+
+DRY_RUN=0
+QUIET=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --quiet)   QUIET=1 ;;
+    *) echo "lane-sweeper: unknown arg $arg" >&2; exit 2 ;;
+  esac
+done
+
+MIN_AGE="${LANE_SWEEP_MIN_AGE:-600}"
+MAX_AGE="${LANE_SWEEP_MAX_AGE:-2700}"
+CPU_LIMIT="${LANE_SWEEP_CPU:-80}"
+RSS_LIMIT_MB="${LANE_SWEEP_RSS_MB:-4096}"
+ORPHAN_AGE="${LANE_SWEEP_ORPHAN_AGE:-60}"
+
+LOG_FILE="$HOME/.claude/logs/lane-sweeper.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+  [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"
+}
+
+# Allowlist. Only these ever get killed.
+KILL_RE='tsc --noEmit|tsc -b|typescript/bin/tsc|bun run type-check|bun run build|next build|next-router-worker|next-render-worker|vercel build|vercel-build|esbuild|webpack|turbopack|vitest|jest|playwright (test|run)|eslint|bun test|tsgo'
+
+# Deny net. Belt-and-braces against a matching substring inside a vital cmdline.
+DENY_RE='(^|/)claude( |$)|ClaudeCode\.app|share/claude/versions/|--dangerously-skip-permissions|bun install|bun add|tmux|sshd?( |$)|/git( |$)|Code Helper|node_modules/.bin/next dev|next dev'
+
+etime_to_secs() {
+  # [[dd-]hh:]mm:ss
+  awk -F'[-:]' '{
+    n = NF
+    s = $n + $(n-1) * 60
+    if (n >= 3) s += $(n-2) * 3600
+    if (n >= 4) s += $(n-3) * 86400
+    print s
+  }' <<< "$1"
+}
+
+proc_cwd() {
+  lsof -p "$1" -a -d cwd -Fn 2>/dev/null | awk '/^n/{print substr($0,2); exit}'
+}
+
+lane_of() {
+  # Own cwd first, then walk up to 4 ancestors — some tools chdir on start.
+  local pid="$1" hop=0 cwd ppid
+  while [[ "$hop" -lt 5 && "$pid" -gt 1 ]]; do
+    cwd="$(proc_cwd "$pid")"
+    case "$cwd" in
+      */.claude/worktrees/*) printf '%s\n' "$cwd"; return 0 ;;
+    esac
+    ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [[ -n "$ppid" ]] || return 1
+    pid="$ppid"
+    hop=$((hop + 1))
+  done
+  return 1
+}
+
+reap=()
+reasons=()
+
+while IFS='|' read -r pid ppid rss pcpu etime cmd; do
+  [[ "$pid" =~ ^[0-9]+$ ]] || continue
+  [[ "$pid" -eq "$$" ]] && continue
+
+  lane="$(lane_of "$pid")" || continue
+  lane_name="${lane##*/.claude/worktrees/}"
+  lane_name="${lane_name%%/*}"
+
+  age="$(etime_to_secs "$etime")"
+  rss_mb=$((rss / 1024))
+  cpu_int="${pcpu%%.*}"
+
+  reason=""
+  if [[ "$ppid" -eq 1 && "$age" -ge "$ORPHAN_AGE" ]]; then
+    reason="orphaned (lane agent gone)"
+  elif [[ "$age" -ge "$MAX_AGE" ]]; then
+    reason="wedged ${age}s > ${MAX_AGE}s"
+  elif [[ "$age" -ge "$MIN_AGE" ]]; then
+    if [[ "$cpu_int" -ge "$CPU_LIMIT" ]]; then
+      reason="cpu ${pcpu}% for ${age}s"
+    elif [[ "$rss_mb" -ge "$RSS_LIMIT_MB" ]]; then
+      reason="rss ${rss_mb}MB for ${age}s"
+    fi
+  fi
+  [[ -z "$reason" ]] && continue
+
+  reap+=("$pid")
+  reasons+=("pid=$pid lane=$lane_name rss=${rss_mb}MB cpu=${pcpu}% age=${age}s reason=\"$reason\" cmd=$(echo "$cmd" | cut -c1-100)")
+done < <(
+  ps -axo pid=,ppid=,rss=,pcpu=,etime=,command= 2>/dev/null \
+    | grep -Ev "$DENY_RE" \
+    | grep -E "$KILL_RE" \
+    | awk '{ pid=$1; ppid=$2; rss=$3; cpu=$4; et=$5;
+             cmd=""; for (i=6; i<=NF; i++) cmd = cmd $i " ";
+             printf "%s|%s|%s|%s|%s|%s\n", pid, ppid, rss, cpu, et, cmd }'
+)
+
+[[ ${#reap[@]} -eq 0 ]] && exit 0
+
+for r in "${reasons[@]}"; do
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "DRY-RUN would kill $r"
+  else
+    log "KILL $r"
+  fi
+done
+
+[[ "$DRY_RUN" -eq 1 ]] && exit 0
+
+kill -TERM "${reap[@]}" 2>/dev/null || true
+sleep 5
+stragglers=()
+for pid in "${reap[@]}"; do
+  kill -0 "$pid" 2>/dev/null && stragglers+=("$pid")
+done
+if [[ ${#stragglers[@]} -gt 0 ]]; then
+  log "SIGKILL stragglers: ${stragglers[*]}"
+  kill -KILL "${stragglers[@]}" 2>/dev/null || true
+fi
+exit 0
