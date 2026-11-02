@@ -12,7 +12,7 @@ assert_eq "active is busy"        "$(lane_class 'ACTIVE:Bash')"               "b
 assert_eq "precheck is busy"      "$(lane_class 'RUNNING:precheck')"          "busy"
 assert_eq "done"                  "$(lane_class 'DONE')"                      "done"
 assert_eq "failed precheck blocks" "$(lane_class 'FAILED:typecheck')"         "blocked"
-assert_eq "handoff is external"   "$(lane_class 'HANDOFF:/tmp/doc.md')"       "ext"
+assert_eq "handoff is busy"       "$(lane_class 'HANDOFF:/tmp/doc.md')"       "busy"
 assert_eq "bare waiting blocks"   "$(lane_class 'WAITING')"                   "blocked"
 assert_eq "untagged input blocks" "$(lane_class 'WAITING:input')"             "blocked"
 assert_eq "ambiguity blocks"      "$(lane_class 'WAITING:ambiguity:which db')" "blocked"

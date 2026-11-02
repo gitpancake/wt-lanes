@@ -22,14 +22,16 @@ fi
 # lane_class <raw-state> -> blocked|ext|review|done|busy|idle
 #
 # blocked = act now (red). ext = waiting on something outside (yellow).
-# review  = expected pause (blue). Unknown pause codes fall to blocked, the
-# safe direction — same rule the board uses.
+# review  = expected pause (blue). HANDOFF is busy: the runner is respawning
+# the session, and the respawn cap re-tags it WAITING:input if that fails.
+# Unknown pause codes fall to blocked, the safe direction — same rule the
+# board uses.
 lane_class() {
   local raw=$1 code
   case "$raw" in
     DONE)        printf 'done';   return ;;
     FAILED*)     printf 'blocked';return ;;
-    HANDOFF*)    printf 'ext';    return ;;
+    HANDOFF*)    printf 'busy';   return ;;
     ACTIVE*|RUNNING*) printf 'busy'; return ;;
     WAITING:*:*) code=${raw#WAITING:}; code=${code%%:*} ;;
     WAITING:*)   code=${raw#WAITING:} ;;

@@ -36,8 +36,9 @@ lane-pause.sh review "PR #1284 open, review pending"
 `lane-handoff.sh <doc-path>` as the lane's final tool call when context
 forces a session swap mid-brief. It is not a `WAITING` code: the lane is not
 blocked on a human — `lane-run.sh` respawns a fresh session that `/resume`s
-the doc. The board shows it yellow; it persists only if the respawn cap is
-hit (the runner then re-tags via `lane-pause.sh input ...`).
+the doc. The tab is not painted, because nothing needs you; the board lists
+it. It persists only if the respawn cap is hit (the runner then re-tags via
+`lane-pause.sh input ...`).
 
 ## Detail field
 
