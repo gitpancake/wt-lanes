@@ -1,9 +1,10 @@
 # Lane ↔ tmux window resolution, state classification, and the tab palette.
 #
 # Single source for machine consumers — installed at ~/.claude/lane-windows.sh
-# and sourced by lane-paint.sh (painting), lane-done.sh (its green flash), and
-# tmux/lane-menu.sh (the jump menu). Pause-code vocab comes from the sibling
-# state-codes.sh; this file maps that vocab onto colours and ordering.
+# and sourced by lane-paint.sh (painting), lane-done.sh (its green flash),
+# lane-holds.sh (the hold blinker/watcher) and tmux/lane-menu.sh (the jump
+# menu). Pause-code vocab comes from the sibling state-codes.sh; this file maps
+# that vocab onto colours and ordering.
 #
 # bash 3.2 compatible (CLAUDE.md invariant 4) — no assoc arrays, no ${x^^}.
 
@@ -17,15 +18,17 @@ if [ -f "$_lw_dir/state-codes.sh" ]; then
 elif [ -f "$HOME/.claude/state-codes.sh" ]; then
   . "$HOME/.claude/state-codes.sh"
 fi
-: "${WT_CODES_RED:=}" "${WT_CODES_YELLOW:=}" "${WT_CODES_DIM:=}"
+: "${WT_CODES_RED:=}" "${WT_CODES_YELLOW:=}" "${WT_CODES_HOLD:=}"
 
-# lane_class <raw-state> -> blocked|ext|review|done|busy|idle
+# lane_class <raw-state> -> blocked|hold|ext|done|busy|idle
 #
-# blocked = act now (red). ext = waiting on something outside (yellow).
-# review  = expected pause (blue). HANDOFF is busy: the runner is respawning
-# the session, and the respawn cap re-tags it WAITING:input if that fails.
-# Unknown pause codes fall to blocked, the safe direction — same rule the
-# board uses.
+# blocked = the lane asked you something (red, cleared by a visit).
+# hold    = a named person must release the PR (purple, blinks until the
+#           state moves; a visit never clears it).
+# ext     = waiting on something outside you and outside any person (yellow).
+# busy    = working, respawning after a handoff, or parked on a Monitor —
+#           nothing is painted. Unknown pause codes fall to blocked, the safe
+#           direction — same rule the board uses.
 lane_class() {
   local raw=$1 code
   case "$raw" in
@@ -38,8 +41,8 @@ lane_class() {
     WAITING)     code=input ;;
     *)           printf 'idle';   return ;;
   esac
-  case " $WT_CODES_YELLOW " in *" $code "*) printf 'ext';    return ;; esac
-  case " $WT_CODES_DIM "    in *" $code "*) printf 'review'; return ;; esac
+  case " $WT_CODES_YELLOW " in *" $code "*) printf 'ext';  return ;; esac
+  case " $WT_CODES_HOLD "   in *" $code "*) printf 'hold'; return ;; esac
   printf 'blocked'
 }
 
@@ -48,8 +51,8 @@ lane_class() {
 lane_class_style() {
   case "$1" in
     blocked) printf 'fg=#1d2021,bg=#ea6962,bold' ;;
+    hold)    printf 'fg=#1d2021,bg=#d3869b,bold' ;;
     ext)     printf 'fg=#1d2021,bg=#d8a657,bold' ;;
-    review)  printf 'fg=#1d2021,bg=#7daea3,bold' ;;
     done)    printf 'fg=#1d2021,bg=#a9b665,bold' ;;
     *)       printf '' ;;
   esac
@@ -58,8 +61,8 @@ lane_class_style() {
 lane_class_glyph() {
   case "$1" in
     blocked) printf '\xe2\x97\x8f' ;;
+    hold)    printf '\xe2\x97\x86' ;;
     ext)     printf '\xe2\x97\x90' ;;
-    review)  printf '\xe2\x97\x8b' ;;
     done)    printf '\xe2\x9c\x93' ;;
     busy)    printf '\xe2\x96\xb6' ;;
     *)       printf '\xc2\xb7' ;;
@@ -70,8 +73,8 @@ lane_class_glyph() {
 lane_prio() {
   case "$1" in
     blocked) printf '0' ;;
-    ext)     printf '1' ;;
-    review)  printf '2' ;;
+    hold)    printf '1' ;;
+    ext)     printf '2' ;;
     done)    printf '3' ;;
     busy)    printf '4' ;;
     *)       printf '5' ;;
@@ -156,14 +159,33 @@ EOF
 # class is a builtin read, and an unchanged class returns before tmux is
 # forked at all.
 
+# Every painted window carries its class in the @lane_class user option. The
+# hold blinker reads it to know which tabs to blink and when to stop.
 lane_paint_apply() {
   local wid=$1 class=$2 style
   style=$(lane_class_style "$class")
+  tmux set-option -w -t "$wid" @lane_class "$class" 2>/dev/null
   if [ -n "$style" ]; then
     tmux set-option -w -t "$wid" window-status-style "$style" 2>/dev/null
   else
     tmux set-option -w -t "$wid" -u window-status-style 2>/dev/null
   fi
+  [ "$class" = hold ] && lane_holds_ensure
+  return 0
+}
+
+# One lane-holds.sh daemon blinks every held tab and watches its gate; it exits
+# on its own when no tab is held, so painting a hold just makes sure one runs.
+lane_holds_ensure() {
+  local pid_file="$HOME/.claude/lane-holds.pid" pid
+  pid=$(cat "$pid_file" 2>/dev/null || printf '')
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  [ -x "$HOME/.claude/scripts/lane-holds.sh" ] || return 0
+  nohup "$HOME/.claude/scripts/lane-holds.sh" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  return 0
 }
 
 # <lane>/.claude/tmux-paint records what the tab was last shown as. A bare
@@ -191,14 +213,15 @@ lane_paint_one() {
 # genuine state change repaints as normal, so a lane that blocks again on
 # something new goes red again.
 #
-# Only attention classes are acked. Acking `busy`/`idle` would write cache
-# entries that suppress the first real block.
+# A hold is never acked: the person who releases it is not you, so looking at
+# the tab changes nothing, and it keeps blinking until the state moves. Acking
+# `busy`/`idle` would write cache entries that suppress the first real block.
 lane_paint_ack() {
   local dir=${1%/} class wid
   [ -d "$dir" ] || return 0
   class=$(lane_class "$(lane_state "$dir")")
   case "$class" in
-    blocked|ext|review|done) ;;
+    blocked|ext|done) ;;
     *) return 0 ;;
   esac
   [ "$(lane_paint_shown "$dir")" = "ack:$class" ] && return 0

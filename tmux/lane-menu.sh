@@ -41,8 +41,8 @@ sorted_rows() { lane_rows | sort -t'|' -k1,1n -k2,2V; }
 class_colour() {
   case "$1" in
     blocked) printf '#ea6962' ;;
+    hold)    printf '#d3869b' ;;
     ext)     printf '#d8a657' ;;
-    review)  printf '#7daea3' ;;
     done)    printf '#a9b665' ;;
     busy)    printf '#d4be98' ;;
     *)       printf '#7c6f64' ;;

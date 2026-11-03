@@ -50,6 +50,7 @@ if [[ -z "$win" && -f "$dir/.claude/tmux-window" ]]; then
     | awk -v l="$label" '$2 == l { print $1; exit }')
 fi
 [[ -z "$win" ]] && exit 0
+tmux set-option -w -t "$win" @lane_class done 2>/dev/null
 
 (
   i=0
@@ -60,7 +61,11 @@ fi
     sleep 0.35
     i=$((i + 1))
   done
-  tmux set-option -w -t "$win" window-status-style "$green" 2>/dev/null
+  if type lane_paint_apply >/dev/null 2>&1; then
+    lane_paint_apply "$win" done
+  else
+    tmux set-option -w -t "$win" window-status-style "$green" 2>/dev/null
+  fi
 ) </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || true
 

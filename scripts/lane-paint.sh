@@ -6,9 +6,11 @@
 #   lane-paint.sh --all             # resync every live lane tab
 #   lane-paint.sh --ack <window_id> # you are on this tab: stop flagging it
 #
-# Red tab = blocked on you, act now. Yellow = blocked on something external.
-# Blue = expected pause (review pending). Green = done. Anything else clears
-# back to the default style, so the tab bar only shouts when a lane needs you.
+# Red tab = the lane asked you something. Purple, blinking = a person must
+# release the PR (never cleared by a visit; lane-holds.sh blinks and watches
+# it). Yellow = waiting on something external. Green = done. Anything else
+# clears back to the default style, so the tab bar only shouts when a lane
+# needs someone.
 #
 # Thin CLI over lane_paint_one / lane_paint_all in ~/.claude/lane-windows.sh,
 # which is also sourced directly by the state-write hooks. Colour palette and

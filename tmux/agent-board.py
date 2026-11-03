@@ -30,12 +30,14 @@ RESET = "\033[0m"
 RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
 DIM = "\033[2m"
 BOLD = "\033[1m"
 
 # Stale threshold for transient states (ACTIVE/WAITING/RUNNING) when no live
 # claude PID is recorded. Long enough to outlast normal tool calls.
 STALE_AFTER_SECS = 300
+MONITOR_STALE_SECS = 900
 HIDE_IDLE_AFTER = int(os.environ.get("BOARD_HIDE_IDLE_AFTER", "1800"))
 SHOW_ALL = bool(os.environ.get("BOARD_SHOW_ALL"))
 PI_ACTIVE_MTIME_SECS = int(os.environ.get("PI_ACTIVE_MTIME_SECS", "30"))
@@ -76,7 +78,7 @@ def load_code_classes():
             text = codes_file.read_text()
         except OSError:
             continue
-        for klass in ("RED", "YELLOW", "DIM"):
+        for klass in ("RED", "YELLOW", "HOLD"):
             m = re.search(rf'^WT_CODES_{klass}="([^"]*)"', text, re.M)
             if m:
                 for code in m.group(1).split():
@@ -239,7 +241,7 @@ def class_for_code(code):
 def priority_for(raw, klass):
     """Sort priority: lower = higher up the board."""
     if raw.startswith("WAITING"):
-        return {"red": 0, "yellow": 2, "dim": 5}.get(klass, 0)
+        return {"red": 0, "hold": 1, "yellow": 2}.get(klass, 0)
     if raw.startswith("FAILED"):
         return 1
     if raw.startswith("HANDOFF"):
@@ -409,6 +411,21 @@ def heal_stale_state(state_file, pid_file, state_mtime):
         pass
 
 
+def heal_monitor_never_returned(state_file, lane_dir):
+    """A turn parked on a Monitor that never re-invoked the lane. Red, with the
+    reason, so the cockpit reads it as stalled rather than busy."""
+    raw = "WAITING:input:monitor never returned"
+    try:
+        tmp = state_file + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(raw + "\n")
+        os.replace(tmp, state_file)
+    except OSError:
+        return "RUNNING:monitor"
+    run([str(HOME / ".claude" / "scripts" / "lane-paint.sh"), lane_dir])
+    return raw
+
+
 def lane_row_from_state_file(state_file, lane_dir):
     """Render a state-file-backed lane row. Returns (prio, text) or None."""
     raw = read_last_line(state_file) or "—"
@@ -446,17 +463,21 @@ def lane_row_from_state_file(state_file, lane_dir):
         elif age > STALE_AFTER_SECS:
             is_stale = True
 
+    if not is_stale and raw == "RUNNING:monitor" and age > MONITOR_STALE_SECS:
+        raw = heal_monitor_never_returned(state_file, lane_dir)
+        state, klass = "W:input", "red"
+
     if is_stale:
         heal_stale_state(state_file, pid_file, state_mtime)
         state, color, prio = "IDLE", DIM, 5
     else:
         if state.startswith("W:"):
-            color = {"red": RED, "yellow": YELLOW, "dim": DIM}.get(klass, RED)
+            color = {"red": RED, "hold": MAGENTA, "yellow": YELLOW}.get(klass, RED)
         elif raw.startswith("FAILED"):
             color = RED
         elif raw.startswith("ACTIVE") or raw == "DONE":
             color = GREEN
-        elif raw == "IDLE":
+        elif raw == "IDLE" or raw == "RUNNING:monitor":
             color = DIM
         else:
             color = YELLOW

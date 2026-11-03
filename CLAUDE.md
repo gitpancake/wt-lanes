@@ -39,7 +39,9 @@ Three roles in the system:
    vocab + every reader.
 2. **Hooks are the only writers.** Exceptions are the lane's deliberate
    final tool calls — `lane-pause.sh` (WAITING), `lane-done.sh` (DONE),
-   `lane-handoff.sh` (HANDOFF:<doc>) — and the Stop-chain hooks preserve
+   `lane-handoff.sh` (HANDOFF:<doc>) — plus `scripts/lane-holds.sh`, the hold
+   watcher, which resolves a held lane to DONE or WAITING:input when the
+   releasing person acts — and the Stop-chain hooks preserve
    those states instead of clobbering them to IDLE/precheck verdicts.
    The ACTIVE hooks write unconditionally, so agent-state is display-only
    for handoffs: the respawn contract is `<wt>/.claude/handoff-doc`,
@@ -68,6 +70,8 @@ Three roles in the system:
    writes `ack:<class>`, so a flag you have already looked at stays clear until
    the lane's state genuinely moves on. Adding a state to the vocab means
    giving it a class in `lane_class`, or it silently classifies as idle.
+   A hold class is never acked: `lane-holds.sh` blinks the tab until the
+   lane's state moves on.
 
 ## Coupling boundaries
 
