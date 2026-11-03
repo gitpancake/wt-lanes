@@ -12,7 +12,14 @@ Three roles in the system:
    re-tag `WAITING:input` via lane-pause). An interactive claude never exits on its own, so
    `lane-handoff.sh` TERMs the lane's claude (pid from `agent-pid`, NEVER an
    ancestor walk — that kills the cockpit on manual runs) after a grace
-   period; that exit is what unblocks the runner. Seeds
+   period; that exit is what unblocks the runner. The runner also owns
+   the lane's survival against kills from outside it: its argv carries the
+   kickoff prompt (which names `bun test`, jest, tsc), so a `pkill -f` or a
+   whole-cmdline reaper matches it — SIGTERM at the runner is handled, not
+   fatal, and a claude that exits non-zero with no sentinel is revived on
+   the SAME session (`--resume` of the id the runner minted with
+   `--session-id`), capped at `WT_MAX_REVIVES` (default 3). Exit 0 and 130
+   are a person quitting and still close the window. Seeds
    `<wt>/.claude/agent-state` to `IDLE` and writes
    `<wt>/.claude/tmux-window` for the board to label the lane.
 2. **State machine** — hooks (`hooks/agent-state-*.sh`, `hooks/precheck-stop.sh`)
