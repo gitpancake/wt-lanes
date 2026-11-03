@@ -6,19 +6,27 @@
 # that have gone runaway: burning CPU, hogging RSS, wedged past a deadline, or
 # orphaned by a dead lane agent.
 #
-# Safety model is allowlist-only: a process is a candidate solely because its
-# command matches KILL_RE below AND its cwd is inside a */.claude/worktrees/*
-# path. Anything else — claude, tmux, git, bun install, dev servers, the user's
-# editor — is never a candidate, at any resource level.
+# Safety model is allowlist-only, judged on the HEAD of argv (the first
+# HEAD_TOKENS words), never the whole command line: a lane's runner carries its
+# kickoff prompt in argv, and that prompt names every build tool below. A
+# process is a candidate solely because its argv head matches KILL_RE AND its
+# cwd is inside a */.claude/worktrees/* path AND it is not a lane: not the
+# lane-run.sh runner, not a claude process, not a tmux pane root, and not the
+# parent of a claude process. Anything else — tmux, git, bun install, dev
+# servers, the user's editor — is never a candidate, at any resource level.
 #
 # Usage: lane-sweeper [--dry-run] [--quiet]
 #
 # Env knobs:
-#   LANE_SWEEP_MIN_AGE   seconds before resource gates apply     (default 600)
-#   LANE_SWEEP_MAX_AGE   seconds after which a proc dies anyway  (default 2700)
-#   LANE_SWEEP_CPU       %CPU threshold                          (default 80)
-#   LANE_SWEEP_RSS_MB    RSS threshold in MB                     (default 4096)
-#   LANE_SWEEP_ORPHAN_AGE seconds before an orphan is reaped        (default 60)
+#   LANE_SWEEP_MIN_AGE    seconds before resource gates apply     (default 600)
+#   LANE_SWEEP_MAX_AGE    seconds after which a proc dies anyway  (default 2700)
+#   LANE_SWEEP_CPU        %CPU threshold                          (default 80)
+#   LANE_SWEEP_RSS_MB     RSS threshold in MB                     (default 4096)
+#   LANE_SWEEP_ORPHAN_AGE seconds before an orphan is reaped      (default 60)
+# Test hooks (never set in production):
+#   LANE_SWEEP_PS_FILE      read `ps -axo pid=,ppid=,rss=,pcpu=,etime=,command=`
+#                           lines from this file instead of running ps
+#   LANE_SWEEP_FIXTURE_LANE treat every pid as living in this worktree path
 
 set -u
 
@@ -37,8 +45,9 @@ MAX_AGE="${LANE_SWEEP_MAX_AGE:-2700}"
 CPU_LIMIT="${LANE_SWEEP_CPU:-80}"
 RSS_LIMIT_MB="${LANE_SWEEP_RSS_MB:-4096}"
 ORPHAN_AGE="${LANE_SWEEP_ORPHAN_AGE:-60}"
+HEAD_TOKENS=6
 
-LOG_FILE="$HOME/.claude/logs/lane-sweeper.log"
+LOG_FILE="${LANE_SWEEP_LOG_FILE:-$HOME/.claude/logs/lane-sweeper.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {
@@ -46,11 +55,11 @@ log() {
   [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"
 }
 
-# Allowlist. Only these ever get killed.
+# Allowlist. Only these ever get killed, and only when they appear in the argv head.
 KILL_RE='tsc --noEmit|tsc -b|typescript/bin/tsc|bun run type-check|bun run build|next build|next-router-worker|next-render-worker|vercel build|vercel-build|esbuild|webpack|turbopack|vitest|jest|playwright (test|run)|eslint|bun test|tsgo'
 
-# Deny net. Belt-and-braces against a matching substring inside a vital cmdline.
-DENY_RE='(^|/)claude( |$)|ClaudeCode\.app|share/claude/versions/|--dangerously-skip-permissions|bun install|bun add|tmux|sshd?( |$)|/git( |$)|Code Helper|node_modules/.bin/next dev|next dev'
+# Deny net, judged on the same argv head. A lane is never a candidate.
+DENY_RE='(^|/)claude( |$)|ClaudeCode\.app|share/claude/versions/|--dangerously-skip-permissions|lane-run\.sh|lane-revive\.sh|mcp\.lane\.json|bun install|bun add|tmux|sshd?( |$)|/git( |$)|Code Helper|node_modules/.bin/next dev|next dev'
 
 etime_to_secs() {
   # [[dd-]hh:]mm:ss
@@ -68,6 +77,10 @@ proc_cwd() {
 }
 
 lane_of() {
+  if [[ -n "${LANE_SWEEP_FIXTURE_LANE:-}" ]]; then
+    printf '%s\n' "$LANE_SWEEP_FIXTURE_LANE"
+    return 0
+  fi
   # Own cwd first, then walk up to 4 ancestors — some tools chdir on start.
   local pid="$1" hop=0 cwd ppid
   while [[ "$hop" -lt 5 && "$pid" -gt 1 ]]; do
@@ -83,12 +96,35 @@ lane_of() {
   return 1
 }
 
+pane_roots=" $(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null | tr '\n' ' ') "
+
+is_pane_root() {
+  [[ "$pane_roots" == *" $1 "* ]]
+}
+
+has_claude_child() {
+  [[ -n "${LANE_SWEEP_PS_FILE:-}" ]] && return 1
+  pgrep -P "$1" -f 'mcp\.lane\.json|^claude( |$)' >/dev/null 2>&1
+}
+
+list_procs() {
+  if [[ -n "${LANE_SWEEP_PS_FILE:-}" ]]; then
+    cat "$LANE_SWEEP_PS_FILE"
+  else
+    ps -axo pid=,ppid=,rss=,pcpu=,etime=,command= 2>/dev/null
+  fi
+}
+
 reap=()
 reasons=()
 
-while IFS='|' read -r pid ppid rss pcpu etime cmd; do
+while IFS='|' read -r pid ppid rss pcpu etime head cmd; do
   [[ "$pid" =~ ^[0-9]+$ ]] || continue
   [[ "$pid" -eq "$$" ]] && continue
+  [[ "$head" =~ $DENY_RE ]] && continue
+  [[ "$head" =~ $KILL_RE ]] || continue
+  is_pane_root "$pid" && continue
+  has_claude_child "$pid" && continue
 
   lane="$(lane_of "$pid")" || continue
   lane_name="${lane##*/.claude/worktrees/}"
@@ -113,14 +149,14 @@ while IFS='|' read -r pid ppid rss pcpu etime cmd; do
   [[ -z "$reason" ]] && continue
 
   reap+=("$pid")
-  reasons+=("pid=$pid lane=$lane_name rss=${rss_mb}MB cpu=${pcpu}% age=${age}s reason=\"$reason\" cmd=$(echo "$cmd" | cut -c1-100)")
+  reasons+=("pid=$pid lane=$lane_name rss=${rss_mb}MB cpu=${pcpu}% age=${age}s reason=\"$reason\" cmd=$cmd")
 done < <(
-  ps -axo pid=,ppid=,rss=,pcpu=,etime=,command= 2>/dev/null \
-    | grep -Ev "$DENY_RE" \
-    | grep -E "$KILL_RE" \
-    | awk '{ pid=$1; ppid=$2; rss=$3; cpu=$4; et=$5;
-             cmd=""; for (i=6; i<=NF; i++) cmd = cmd $i " ";
-             printf "%s|%s|%s|%s|%s|%s\n", pid, ppid, rss, cpu, et, cmd }'
+  list_procs \
+    | awk -v n="$HEAD_TOKENS" '{
+        pid=$1; ppid=$2; rss=$3; cpu=$4; et=$5;
+        head=""; for (i=6; i<=NF && i<6+n; i++) head = head $i " ";
+        cmd=""; for (i=6; i<=NF && length(cmd) < 100; i++) cmd = cmd $i " ";
+        printf "%s|%s|%s|%s|%s|%s|%s\n", pid, ppid, rss, cpu, et, head, substr(cmd, 1, 100) }'
 )
 
 [[ ${#reap[@]} -eq 0 ]] && exit 0
