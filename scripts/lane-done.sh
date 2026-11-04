@@ -11,6 +11,20 @@
 set -u
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+
+# A lane is done only when its PR's CI is green. The review gate never read CI, so
+# "arbiter success" alone marked lanes done on red pr-checks (PR #10460, 2026-11-04).
+# LANE_DONE_FORCE=1 skips the check for a repo whose PR has no checks to read.
+red_checks=""
+if [[ "${LANE_DONE_FORCE:-}" != "1" ]] && command -v gh >/dev/null 2>&1; then
+  red_checks=$(cd "$dir" && gh pr view --json statusCheckRollup \
+    --jq '[.statusCheckRollup[] | select((.conclusion // .state) | test("^(FAILURE|TIMED_OUT|ERROR)$")) | (.name // .context)] | join(", ")' 2>/dev/null || true)
+fi
+if [[ -n "$red_checks" ]]; then
+  printf 'lane-done.sh: refusing — CI is red on this PR (%s). Fix, push, gate once more; never done on a red sha.\n' "$red_checks" >&2
+  exit 1
+fi
+
 mkdir -p "$dir/.claude"
 # Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
 tmp="$dir/.claude/agent-state.tmp.$$"
