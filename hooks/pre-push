@@ -6,8 +6,14 @@
 # pr-checks nothing in the lane reads (2026-11-04: 6 of 6 red lane PRs were guards).
 # A repo without gates/prChecks/runGuards.ts has nothing to run and pushes as before.
 # WT_SKIP_GUARDS=1 skips it for a person who knows why; lanes never set it.
-# Pushes serialise across worktrees on one lock, because runGuards.ts fans out to
-# every core and three lanes pushing at once has OOMed the laptop.
+#
+# It must finish in seconds: git opens the SSH connection BEFORE this hook runs and
+# GitHub drops a connection that idles for minutes ("Connection to github.com closed
+# by remote host", exit 141, after the guards had passed). The first version ran
+# runGuards.ts whole behind a lock; nine lane pushes queued behind one 100s run and
+# every one of them lost its connection. So: the guard list is read from runGuards.ts
+# (no second list to drift), the hang detector is skipped — it is sized for the CI
+# runner and takes 90-115s here — and the rest run in parallel, ~5s, no lock.
 # macOS bash 3.2 compatible.
 
 set -u
@@ -24,46 +30,37 @@ while read -r _local_ref local_sha _remote_ref _remote_sha; do
 done
 [[ -n "${has_push:-}" ]] || exit 0
 
-lock_dir="${WT_RUN_DIR:-$HOME/.wt-lanes/run}/guards.lock"
-mkdir -p "$(dirname "$lock_dir")"
-waited=0
-while ! mkdir "$lock_dir" 2>/dev/null; do
-  if [[ $waited -eq 0 ]]; then
-    echo "pre-push: another worktree is running the CI guards — waiting for the lock" >&2
-  fi
-  if [[ -d "$lock_dir" && $(( $(date +%s) - $(stat -f %m "$lock_dir" 2>/dev/null || echo 0) )) -gt 900 ]]; then
-    rm -rf "$lock_dir"
-    continue
-  fi
-  sleep 5
-  waited=$((waited + 5))
-  if [[ $waited -ge 600 ]]; then
-    echo "pre-push: gave up waiting for the guards lock after 10 min — push refused; retry" >&2
-    exit 1
-  fi
-done
-trap 'rm -rf "$lock_dir"' EXIT
+skipped_guards="credless-test-hermetic"
 
-# credless-test-hermetic is a hang detector with a wall-clock cap sized for the CI
-# runner (120s; the suite takes ~18s there). On a laptop running lanes the same suite
-# takes 92-115s and tripped the cap on the hook's first live push. A real hang still
-# trips the raised cap.
-export CREDLESS_INTEGRATION_CAP_MS="${CREDLESS_INTEGRATION_CAP_MS:-600000}"
-export CREDLESS_UNIT_CAP_MS="${CREDLESS_UNIT_CAP_MS:-900000}"
-
-echo "pre-push: running the CI guards (gates/prChecks/runGuards.ts) before the push" >&2
-log=$(mktemp -t wt-guards)
-if (cd "$toplevel" && bun run gates/prChecks/runGuards.ts > "$log" 2>&1); then
-  rm -f "$log"
+cd "$toplevel" || exit 0
+guard_names=$(bun -e 'import { GUARDS } from "./gates/prChecks/runGuards.ts"; console.log(Object.keys(GUARDS).join("\n"))' 2>/dev/null)
+if [[ -z "$guard_names" ]]; then
+  echo "pre-push: could not read the guard list from gates/prChecks/runGuards.ts — pushing unguarded" >&2
   exit 0
 fi
 
-echo "pre-push: PUSH REFUSED — CI guards are red. Fix every failure below, commit, push again." >&2
-awk '
-  /^::group::/ { name = $0; sub(/^::group::/, "", name); infail = (name ~ / — FAIL$/); if (infail) print "\n## " name; next }
-  /^::endgroup::/ { infail = 0; next }
-  /^::error::/ { sub(/^::error::/, ""); print "\n" $0; next }
-  infail { print }
-' "$log" >&2
-echo "full guard output: $log" >&2
+echo "pre-push: running the CI guards before the push (skipping: $skipped_guards)" >&2
+log_dir=$(mktemp -d -t wt-guards)
+run_one() {
+  local name=$1
+  bun run "check:$name" > "$log_dir/$name.log" 2>&1
+  echo "$name $?" >> "$log_dir/verdicts"
+}
+export -f run_one
+export log_dir
+printf '%s\n' "$guard_names" | grep -vxF "$skipped_guards" | xargs -P 4 -I{} bash -c 'run_one "$1"' _ {}
+
+failed=$(awk '$2 != 0 { print $1 }' "$log_dir/verdicts" | sort)
+if [[ -z "$failed" ]]; then
+  rm -rf "$log_dir"
+  exit 0
+fi
+
+echo "pre-push: PUSH REFUSED — CI guards are red: $(printf '%s' "$failed" | tr '\n' ' ')" >&2
+echo "Fix every failure below, commit, push again." >&2
+for name in $failed; do
+  printf '\n## %s — FAIL\n' "$name" >&2
+  cat "$log_dir/$name.log" >&2
+done
+echo "guard logs: $log_dir" >&2
 exit 1
