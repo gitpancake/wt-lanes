@@ -44,6 +44,13 @@ while ! mkdir "$lock_dir" 2>/dev/null; do
 done
 trap 'rm -rf "$lock_dir"' EXIT
 
+# credless-test-hermetic is a hang detector with a wall-clock cap sized for the CI
+# runner (120s; the suite takes ~18s there). On a laptop running lanes the same suite
+# takes 92-115s and tripped the cap on the hook's first live push. A real hang still
+# trips the raised cap.
+export CREDLESS_INTEGRATION_CAP_MS="${CREDLESS_INTEGRATION_CAP_MS:-600000}"
+export CREDLESS_UNIT_CAP_MS="${CREDLESS_UNIT_CAP_MS:-900000}"
+
 echo "pre-push: running the CI guards (gates/prChecks/runGuards.ts) before the push" >&2
 log=$(mktemp -t wt-guards)
 if (cd "$toplevel" && bun run gates/prChecks/runGuards.ts > "$log" 2>&1); then
