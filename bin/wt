@@ -364,6 +364,26 @@ spawned_this_run=0
 # A lane whose lockfile differs from the cockpit's always gets its own tree plus a
 # real install -- never a symlink, which would write through into the cockpit's
 # node_modules. Opt out entirely with WT_NO_DEPS=1.
+# ---- push guard ------------------------------------------------------------
+# Every push from any worktree of the repo runs the repo's CI guards first
+# (hooks/pre-push). Hooks live in the repo's common git dir, so one symlink
+# covers the cockpit and every lane. A pre-push someone else installed is left
+# alone and reported, never overwritten.
+install_push_guard() {
+  local repo=$1 hooks_dir hook src="${WT_HOME:-$HOME/.wt-lanes}/hooks/pre-push"
+  hooks_dir=$(git -C "$repo" rev-parse --git-path hooks 2>/dev/null) || return 0
+  [[ "$hooks_dir" = /* ]] || hooks_dir="$repo/$hooks_dir"
+  hook="$hooks_dir/pre-push"
+  if [[ -L "$hook" && "$(readlink "$hook")" == "$src" ]]; then return 0; fi
+  if [[ -e "$hook" ]]; then
+    echo "wt: $hook exists and is not the wt push guard — leaving it; the CI guards will not run before pushes from this repo" >&2
+    return 0
+  fi
+  mkdir -p "$hooks_dir"
+  ln -s "$src" "$hook"
+  echo "wt: installed the CI push guard at $hook" >&2
+}
+
 provision_deps() {
   local repo=$1 wt=$2
 
@@ -492,6 +512,7 @@ spawn_lane() {
   fi
 
   provision_deps "$repo" "$s_wt"
+  install_push_guard "$repo"
 
   # Per-lane port: stamp once. A reused worktree keeps the port it already has.
   # Allocate max(stamped sibling ports)+1, not 3099+dir-count — a dir count

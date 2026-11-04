@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Installed by `wt` as <repo>/.git/hooks/pre-push (a symlink, so every worktree of
+# the repo — lane or cockpit — runs it). Runs the repo's CI guards before any push
+# and blocks the push when one is red, so a guard failure never reaches GitHub,
+# where it would fire a review round and come back minutes later as a red
+# pr-checks nothing in the lane reads (2026-11-04: 6 of 6 red lane PRs were guards).
+# A repo without gates/prChecks/runGuards.ts has nothing to run and pushes as before.
+# WT_SKIP_GUARDS=1 skips it for a person who knows why; lanes never set it.
+# Pushes serialise across worktrees on one lock, because runGuards.ts fans out to
+# every core and three lanes pushing at once has OOMed the laptop.
+# macOS bash 3.2 compatible.
+
+set -u
+
+[[ "${WT_SKIP_GUARDS:-}" == "1" ]] && exit 0
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+runner="$toplevel/gates/prChecks/runGuards.ts"
+[[ -f "$runner" ]] || exit 0
+
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  has_push=1
+done
+[[ -n "${has_push:-}" ]] || exit 0
+
+lock_dir="${WT_RUN_DIR:-$HOME/.wt-lanes/run}/guards.lock"
+mkdir -p "$(dirname "$lock_dir")"
+waited=0
+while ! mkdir "$lock_dir" 2>/dev/null; do
+  if [[ $waited -eq 0 ]]; then
+    echo "pre-push: another worktree is running the CI guards — waiting for the lock" >&2
+  fi
+  if [[ -d "$lock_dir" && $(( $(date +%s) - $(stat -f %m "$lock_dir" 2>/dev/null || echo 0) )) -gt 900 ]]; then
+    rm -rf "$lock_dir"
+    continue
+  fi
+  sleep 5
+  waited=$((waited + 5))
+  if [[ $waited -ge 600 ]]; then
+    echo "pre-push: gave up waiting for the guards lock after 10 min — push refused; retry" >&2
+    exit 1
+  fi
+done
+trap 'rm -rf "$lock_dir"' EXIT
+
+echo "pre-push: running the CI guards (gates/prChecks/runGuards.ts) before the push" >&2
+log=$(mktemp -t wt-guards)
+if (cd "$toplevel" && bun run gates/prChecks/runGuards.ts > "$log" 2>&1); then
+  rm -f "$log"
+  exit 0
+fi
+
+echo "pre-push: PUSH REFUSED — CI guards are red. Fix every failure below, commit, push again." >&2
+awk '
+  /^::group::/ { name = $0; sub(/^::group::/, "", name); infail = (name ~ / — FAIL$/); if (infail) print "\n## " name; next }
+  /^::endgroup::/ { infail = 0; next }
+  /^::error::/ { sub(/^::error::/, ""); print "\n" $0; next }
+  infail { print }
+' "$log" >&2
+echo "full guard output: $log" >&2
+exit 1
