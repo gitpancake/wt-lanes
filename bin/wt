@@ -431,6 +431,23 @@ provision_deps() {
   ( cd "$wt" && bun install >/dev/null 2>&1 ) || true
 }
 
+# Lanes that still need attention. A lane that is DONE, parked on the
+# review-gate Monitor, or in a hold or yellow wait (holland, human,
+# prompt-owner, review, external) waits on a reviewer or a named person, not
+# on you, so it no longer uses a WT_MAX_LANES slot. Red pauses still count.
+count_attention_lanes() {
+  local pid laneDir laneState count=0
+  for pid in $(pgrep -f 'mcp\.lane\.json' 2>/dev/null); do
+    laneDir=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+    laneState=$(head -1 "$laneDir/.claude/agent-state" 2>/dev/null)
+    case "$laneState" in
+      DONE*|RUNNING:monitor*|WAITING:holland:*|WAITING:human:*|WAITING:prompt-owner:*|WAITING:review:*|WAITING:external:*) ;;
+      *) count=$((count + 1)) ;;
+    esac
+  done
+  echo "$count"
+}
+
 # ---- lane spawn helper -----------------------------------------------------
 # Args: <slug> <branch> <wt_path> <initial-prompt-or-empty> [tmux-label]
 spawn_lane() {
@@ -473,12 +490,19 @@ spawn_lane() {
   # (2026-07-14: concurrent lane typechecks — cartage-agent `tsc --noEmit`
   # peaks ~5.4GB each — swap-thrashed the 16GB cockpit; memory pressure is
   # handled by the lane-bin typecheck lock, this cap only stops pile-ups).
-  # Running lanes are counted by their claude-lane fingerprint
-  # (--mcp-config mcp.lane.json). WT_MAX_LANES=0 disables.
+  # WT_MAX_LANES counts lanes needing attention (count_attention_lanes);
+  # WT_MAX_PROCESSES caps every running lane process, held or not, as the
+  # memory backstop. WT_MAX_LANES=0 disables both.
   local max_lanes="${WT_MAX_LANES:-10}"
   if (( max_lanes > 0 )); then
     local active_lanes
-    active_lanes=$(pgrep -f 'mcp\.lane\.json' 2>/dev/null | wc -l | tr -d ' ') || true
+    active_lanes=$(count_attention_lanes)
+    local running_lanes
+    running_lanes=$(pgrep -f 'mcp\.lane\.json' 2>/dev/null | wc -l | tr -d ' ') || true
+    if (( running_lanes + spawned_this_run >= ${WT_MAX_PROCESSES:-10} )); then
+      echo "wt: memory backstop hit — $running_lanes lane processes running (WT_MAX_PROCESSES=${WT_MAX_PROCESSES:-10}). Close finished lanes first." >&2
+      return 1
+    fi
     if (( active_lanes + spawned_this_run >= max_lanes )); then
       echo "wt: lane cap hit — $active_lanes running + $spawned_this_run spawned this run >= WT_MAX_LANES=$max_lanes. Wait for a lane to finish, or override: WT_MAX_LANES=$((active_lanes + spawned_this_run + 1)) wt ..." >&2
       return 1
@@ -674,8 +698,8 @@ test_rule="Test runs are SCOPED to the files your slice touches — NEVER a repo
 stop_rule="Every stop ends in exactly ONE of three final tool calls. \`~/.claude/scripts/lane-done.sh\` when the PR is open, the arbiter is green on the final sha, and every finding is addressed + pushed (or review skipped per repo policy) — it marks the lane DONE and flashes the tab green; never claim done without it. \`~/.claude/scripts/lane-pause.sh <code> '<detail>'\` with a code from ~/.claude/agent-state-vocab.md: review never settled → review; a person must release the PR → holland | human | prompt-owner; ambiguity not in the brief/plan, repeated test failure on one root cause, missing credential → ambiguity | test-loop | creds; a rate limit or vendor outage → external. \`~/.claude/scripts/lane-handoff.sh <doc>\` when context forces a session swap. A turn that ends with none of them shows on the cockpit as 'stopped without a pause code' and counts as a protocol breach."
 
 if [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]]; then
-  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / general-purpose / Explore) via the Agent tool with a WRITTEN prompt — never subagent_type fork (it inherits your whole context) and never a Workflow — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them. An Agent result of [Request interrupted by user for tool use] means the subagent was killed, not that it declined: git status, read what landed on disk, continue; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Past ~240K context (a non-blocking nudge fires at 260K/320K/380K): if implementation is shipped and only the review loop remains, do NOT hand off — finish the loop (one poll + one feedback pass) and lane-done.sh. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
-  resume_template="Autonomous mode, resumed after a context handoff ({N}/{MAX}). Run /resume with the handoff doc at {DOC} — it carries the lane state; re-read the brief it points to before acting. Continue the work end-to-end, including any pending review loop. Verification is CHEAP and FOREGROUND: \`bun type-check\` (~15s warm / ~45s cold) and scoped tests run as one plain foreground Bash command — never run_in_background, never piped into \`tail\`. Never kill build tools by pattern (pkill/killall) — it reaps sibling lanes' checks; kill only PIDs you spawned. A rebase that replays cleanly with no new code of yours since the last green check needs no local re-verify — push; CI's pr-checks re-runs the same type-check on every push. ${review_rule} ${stop_rule} If context forces another handoff: /handoff, then ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call."
+  harness_rule="Cross-layer slice or layer-specialist work? Dispatch the matching subagent (backend / frontend / infra / general-purpose / Explore) via the Agent tool with a WRITTEN prompt — never subagent_type fork (it inherits your whole context) and never a Workflow — do not impersonate it inline — and inline shared setup VALUES (tokens, env, IDs) into the agent prompt so siblings never re-derive them. An Agent result of [Request interrupted by user for tool use] means the subagent was killed, not that it declined: git status, read what landed on disk, continue; anything poll-shaped is ONE timeout/until Bash loop, never repeated calls. Read economy: grep first, Read with offset/limit; after an Edit the result is already in context — never full-file re-read, especially test files between tdd cycles. Context nudges fire at 260K/320K/380K before a PR is open and at 340K/375K after. Once the PR is open, finish gate rounds, finding fixes, the manual-test subagent and rebases in this session; hand off only at the 375K nudge, using the short post-PR /handoff form. Manual testing always runs in ONE general-purpose subagent (lane-protocol.md §Manual testing): screenshots and steps go in the PR body via gh pr edit --attach, and the lane never Reads a screenshot itself. Browser work is the repo's Playwright, never Claude in Chrome. Otherwise wrap the in-flight slice, commit, run /handoff, then run ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call and stop — the lane runner respawns a fresh session that /resumes the doc and continues the brief, including a pending review loop. Do not compact."
+  resume_template="Autonomous mode, resumed after a context handoff ({N}/{MAX}). Run /resume with the handoff doc at {DOC} — it carries the lane state. If the doc has a ## PR section (post-PR form), act on its ## Left list straight away: do not re-read the brief and do not re-run type-check, tests or AC greps first; the pre-push hook and CI verify the next push. Otherwise re-read the brief it points to before acting. Continue the work end-to-end, including any pending review loop. Verification is CHEAP and FOREGROUND: \`bun type-check\` (~15s warm / ~45s cold) and scoped tests run as one plain foreground Bash command — never run_in_background, never piped into \`tail\`. Never kill build tools by pattern (pkill/killall) — it reaps sibling lanes' checks; kill only PIDs you spawned. A rebase that replays cleanly with no new code of yours since the last green check needs no local re-verify — push; CI's pr-checks re-runs the same type-check on every push. ${review_rule} ${stop_rule} If context forces another handoff: /handoff, then ~/.claude/scripts/lane-handoff.sh <doc-path> as your FINAL tool call."
 else
   harness_rule="Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work."
   resume_template=""
