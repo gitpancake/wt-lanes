@@ -436,14 +436,20 @@ provision_deps() {
 # prompt-owner, review, external) waits on a reviewer or a named person, not
 # on you, so it no longer uses a WT_MAX_LANES slot. Red pauses still count.
 count_attention_lanes() {
-  local pid laneDir laneState count=0
+  source "$HOME/.claude/state-codes.sh"
+  local pid laneDir laneState laneCode count=0
   for pid in $(pgrep -f 'mcp\.lane\.json' 2>/dev/null); do
     laneDir=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
     laneState=$(head -1 "$laneDir/.claude/agent-state" 2>/dev/null)
     case "$laneState" in
-      DONE*|RUNNING:monitor*|WAITING:holland:*|WAITING:human:*|WAITING:prompt-owner:*|WAITING:review:*|WAITING:external:*) ;;
-      *) count=$((count + 1)) ;;
+      DONE* | RUNNING:monitor*) continue ;;
+      WAITING:*)
+        laneCode=${laneState#WAITING:}
+        laneCode=${laneCode%%:*}
+        [[ " $WT_CODES_YELLOW $WT_CODES_HOLD " == *" $laneCode "* ]] && continue
+        ;;
     esac
+    count=$((count + 1))
   done
   echo "$count"
 }
