@@ -18,6 +18,8 @@ git -C "$lane" init -q
 printf 'held-lane\n' > "$lane/.claude/tmux-window"
 class_file="$TEST_TMP/class"
 status_file="$TEST_TMP/gate-status"
+red_checks_file="$TEST_TMP/red-checks"
+: > "$red_checks_file"
 
 cat > "$TEST_TMP/bin/tmux" <<EOF
 #!/usr/bin/env bash
@@ -40,7 +42,11 @@ EOF
 cat > "$TEST_TMP/bin/gh" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-  pr)   printf '12\tabc123\n' ;;
+  pr)
+    case "\$*" in
+      *statusCheckRollup*) cat "$red_checks_file" ;;
+      *)                   printf '12\tabc123\n' ;;
+    esac ;;
   repo) printf 'o/r\n' ;;
   api)  cat "$status_file" ;;
 esac
@@ -73,6 +79,18 @@ run_daemon
 assert_rc "exits after the release" $? 0
 assert_eq "released hold becomes DONE" "$(state)" "DONE"
 assert_eq "tab class follows to done" "$(cat "$class_file")" "done"
+
+# --- released on red CI: lane-done refuses, so the hold stands -------------------
+printf 'WAITING:holland:PR #12 answered\n' > "$lane/.claude/agent-state"
+printf 'hold\n' > "$class_file"
+printf 'success\tapproved: ok\n' > "$status_file"
+printf 'pr-checks\n' > "$red_checks_file"
+bash "$REPO_DIR/scripts/lane-holds.sh" >/dev/null 2>&1 &
+dpid=$!
+sleep 0.5
+kill "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+assert_eq "a release on red CI keeps the hold" "$(state)" "WAITING:holland:PR #12 answered"
+: > "$red_checks_file"
 
 # --- hold still held: untouched --------------------------------------------------
 printf 'WAITING:human:PR #12 schema\n' > "$lane/.claude/agent-state"
