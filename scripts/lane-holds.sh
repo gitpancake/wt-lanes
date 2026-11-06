@@ -65,8 +65,7 @@ notify() {
 }
 
 write_lane_state() {
-  local dir=$1 state=$2 tmp="$1/.claude/agent-state.tmp.holds.$$"
-  printf '%s\n' "$state" > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
+  lane_state_write "$1" "$2"
   "$HOME/.claude/scripts/lane-paint.sh" "$dir" 2>/dev/null || true
 }
 

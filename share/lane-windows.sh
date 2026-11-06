@@ -20,31 +20,7 @@ elif [ -f "$HOME/.claude/state-codes.sh" ]; then
 fi
 : "${WT_CODES_RED:=}" "${WT_CODES_YELLOW:=}" "${WT_CODES_HOLD:=}"
 
-# lane_class <raw-state> -> blocked|hold|ext|done|busy|idle
-#
-# blocked = the lane asked you something (red, cleared by a visit).
-# hold    = a named person must release the PR (purple, blinks until the
-#           state moves; a visit never clears it).
-# ext     = waiting on something outside you and outside any person (yellow).
-# busy    = working, respawning after a handoff, or parked on a Monitor —
-#           nothing is painted. Unknown pause codes fall to blocked, the safe
-#           direction — same rule the board uses.
-lane_class() {
-  local raw=$1 code
-  case "$raw" in
-    DONE)        printf 'done';   return ;;
-    FAILED*)     printf 'blocked';return ;;
-    HANDOFF*)    printf 'busy';   return ;;
-    ACTIVE*|RUNNING*) printf 'busy'; return ;;
-    WAITING:*:*) code=${raw#WAITING:}; code=${code%%:*} ;;
-    WAITING:*)   code=${raw#WAITING:} ;;
-    WAITING)     code=input ;;
-    *)           printf 'idle';   return ;;
-  esac
-  case " $WT_CODES_YELLOW " in *" $code "*) printf 'ext';  return ;; esac
-  case " $WT_CODES_HOLD "   in *" $code "*) printf 'hold'; return ;; esac
-  printf 'blocked'
-}
+# lane_class lives in state-codes.sh with the rest of the state rules.
 
 # lane_class_style <class> -> a tmux window-status-style, or empty for
 # "leave the tab alone". Gruvbox Material Medium Dark, matching ~/.tmux.conf.

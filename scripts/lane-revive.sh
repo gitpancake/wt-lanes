@@ -22,15 +22,12 @@ source "$HOME/.claude/lane-windows.sh"
 WT_BIN=$(command -v wt) || { printf 'lane-revive: wt not on PATH\n' >&2; exit 1; }
 [[ -L "$WT_BIN" ]] && WT_BIN=$(readlink "$WT_BIN")
 
-# Pull `review_rule` / `test_rule` / `stop_rule` / `harness_rule` /
-# `resume_template` out of wt's fragment block. They are plain assignments, so
-# sourcing the slice is safe and keeps wt the single source of the wording.
+# The resume prompt is built from the same fragments wt uses (share/prompts).
 load_fragments() {
-  local frag
-  frag=$(sed -n '/^# ---- lane kickoff prompt fragments/,/^# ---- single-lane mode/p' "$WT_BIN")
-  [[ -n "$frag" ]] || { printf 'lane-revive: could not find wt prompt fragments\n' >&2; exit 1; }
-  eval "$frag"
-  [[ -n "${resume_template:-}" ]] || { printf 'lane-revive: wt produced no resume template (Pi lane?)\n' >&2; exit 1; }
+  [[ "${WT_AGENT_CMD:-${WT_CLAUDE:-claude}}" == *claude* ]] \
+    || { printf 'lane-revive: wt produced no resume template (Pi lane?)\n' >&2; exit 1; }
+  source "$HOME/.claude/render-prompt.sh"
+  resume_template=$(render_prompt resume)
 }
 
 # The doc the lane was told to resume from: explicit arg, else the path
@@ -83,7 +80,7 @@ revive_one() {
   # The lane stopped on a WAITING tag. Clear it before the window opens, or the
   # tab reopens still flagged and the board keeps reporting a blocker that the
   # revive just resolved.
-  printf 'IDLE\n' > "$dir/.claude/agent-state"
+  lane_state_write "$dir" IDLE
   rm -f "$dir/.claude/tmux-paint" "$dir/.claude/handoff-doc"
 
   lane_cmd="$HOME/.claude/scripts/lane-run.sh $(printf '%q' "$dir") $(printf '%q' "$agent_cmd") $(printf '%q' "$prompt") $(printf '%q' "$resume_template")"

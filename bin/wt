@@ -436,20 +436,10 @@ provision_deps() {
 # prompt-owner, review, external) waits on a reviewer or a named person, not
 # on you, so it no longer uses a WT_MAX_LANES slot. Red pauses still count.
 count_attention_lanes() {
-  source "$HOME/.claude/state-codes.sh"
-  local pid laneDir laneState laneCode count=0
+  local pid laneDir count=0
   for pid in $(pgrep -f 'mcp\.lane\.json' 2>/dev/null); do
     laneDir=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
-    laneState=$(head -1 "$laneDir/.claude/agent-state" 2>/dev/null)
-    case "$laneState" in
-      DONE* | RUNNING:monitor*) continue ;;
-      WAITING:*)
-        laneCode=${laneState#WAITING:}
-        laneCode=${laneCode%%:*}
-        [[ " $WT_CODES_YELLOW $WT_CODES_HOLD " == *" $laneCode "* ]] && continue
-        ;;
-    esac
-    count=$((count + 1))
+    lane_state_uses_slot "$(head -1 "$laneDir/.claude/agent-state" 2>/dev/null)" && count=$((count + 1))
   done
   echo "$count"
 }
@@ -564,8 +554,7 @@ spawn_lane() {
     printf 'PORT=%s\n' "$port" > "$s_wt/.env.local.port"
   fi
 
-  mkdir -p "$s_wt/.claude"
-  echo "IDLE" > "$s_wt/.claude/agent-state"
+  lane_state_write "$s_wt" IDLE
   # Authoritative label for agent-board. Trusted over tmux window-name walk,
   # which can pick up an unrelated parent window (e.g. cockpit) when the lane
   # was spawned via `pane` layout or launched manually.
@@ -698,6 +687,7 @@ JSON
 # carries lane-lifecycle rules the agent can't derive from those.
 
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share/render-prompt.sh"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share/state-codes.sh"
 
 
 

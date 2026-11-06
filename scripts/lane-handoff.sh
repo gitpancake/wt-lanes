@@ -53,12 +53,10 @@ fi
 # we just handed off is far younger than the window, so this never eats it.
 find "$HOME/.claude/handoffs" -maxdepth 1 -name '*.md' -mtime +"${HANDOFF_RETENTION_DAYS:-14}" -delete 2>/dev/null || true
 
+source "$HOME/.claude/state-codes.sh"
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-mkdir -p "$dir/.claude"
 state_file="$dir/.claude/agent-state"
-# Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
-tmp="$state_file.tmp.$$"
-printf 'HANDOFF:%s\n' "$doc" > "$tmp" && mv -f "$tmp" "$state_file"
+lane_state_write "$dir" "HANDOFF:$doc"
 "$HOME/.claude/scripts/lane-paint.sh" "$dir" 2>/dev/null || true
 
 case "$dir" in
@@ -99,8 +97,7 @@ grace=${WT_HANDOFF_KILL_GRACE:-20}
   # re-assert HANDOFF so the board shows the truth while the runner recycles
   # (the respawn itself keys off the sentinel, immune to hook clobbers).
   [[ "$(tail -n1 "$state_file" 2>/dev/null)" == "DONE" ]] && { rm -f "$doc_file"; exit 0; }
-  retmp="$state_file.tmp.handoff.$$"
-  printf 'HANDOFF:%s\n' "$doc" > "$retmp" && mv -f "$retmp" "$state_file"
+  lane_state_write "$dir" "HANDOFF:$doc"
   kill -TERM "$lane_pid" 2>/dev/null
   for _ in 1 2 3 4 5; do
     kill -0 "$lane_pid" 2>/dev/null || exit 0

@@ -21,6 +21,8 @@
 
 WT_SESSIONS_DIR="$HOME/.claude/wt-sessions"
 
+source "$HOME/.claude/state-codes.sh"
+
 # Tab painting rides along with the write so a lane's tmux tab turns red the
 # moment it blocks on you. Sourced, not spawned: an unchanged state class
 # returns before tmux is forked, so the per-tool-call path stays fork-free.
@@ -29,15 +31,7 @@ if [[ -f "$HOME/.claude/lane-windows.sh" ]]; then
   source "$HOME/.claude/lane-windows.sh"
 fi
 
-# A deliberate final state: the lane's own last word (lane-done / lane-pause /
-# lane-handoff) or a turn parked on a Monitor. The Stop, Notification and
-# precheck hooks never overwrite one — clobbering it erases the exit reason.
-state_is_final() {
-  case "$1" in
-    DONE|HANDOFF:*|WAITING:*:*|RUNNING:monitor) return 0 ;;
-  esac
-  return 1
-}
+# state_is_final lives in state-codes.sh with the rest of the state rules.
 
 _atomic_write() {
   local path=$1 content=$2 tmp="$1.tmp.$$"

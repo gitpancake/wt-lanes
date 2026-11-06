@@ -25,10 +25,8 @@ if [[ -n "$red_checks" ]]; then
   exit 1
 fi
 
-mkdir -p "$dir/.claude"
-# Atomic (tmp + mv): the state file has multiple writers + 2s-tick readers.
-tmp="$dir/.claude/agent-state.tmp.$$"
-printf 'DONE\n' > "$tmp" && mv -f "$tmp" "$dir/.claude/agent-state"
+source "$HOME/.claude/state-codes.sh"
+lane_state_write "$dir" DONE
 # A finished lane must never respawn off an earlier handoff in this session.
 rm -f "$dir/.claude/handoff-doc"
 
