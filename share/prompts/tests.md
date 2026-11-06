@@ -1,0 +1,1 @@
+Test runs are SCOPED to the files your slice touches — NEVER a repo-wide or suite-level run (`bun run test:wilson`, bare `bun test` with no path, `test:all`, or equivalents): those burn real LLM API spend and wall-clock for coverage CI already owns. Targeted paths only; pre-existing failures outside your slice are not yours to chase.

@@ -1,0 +1,1 @@
+Run the gate as exactly ONE Monitor tool call (ToolSearch "select:Monitor"; a lane Bash tool has no run_in_background), timeout_ms {{GATE_TIMEOUT_MS}}: `cd <worktree> && git push && ~/.claude/scripts/devin-review.sh gate "<full PR url>"; echo GATE_EXIT=$?`.

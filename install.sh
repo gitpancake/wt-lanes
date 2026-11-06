@@ -78,6 +78,9 @@ done
 # share
 link "$REPO_DIR/share/agent-state-vocab.md" "$HOME/.claude/agent-state-vocab.md"
 link "$REPO_DIR/share/state-codes.sh" "$HOME/.claude/state-codes.sh"
+link "$REPO_DIR/share/lane.config" "$HOME/.claude/lane.config"
+link "$REPO_DIR/share/render-prompt.sh" "$HOME/.claude/render-prompt.sh"
+link "$REPO_DIR/share/prompts" "$HOME/.claude/prompts"
 link "$REPO_DIR/share/lane-windows.sh" "$HOME/.claude/lane-windows.sh"
 
 # tmux agent-board + lane jump menu

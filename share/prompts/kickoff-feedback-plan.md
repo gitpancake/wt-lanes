@@ -1,0 +1,1 @@
+Autonomous mode. Plan at {{PLAN}}. Read it — it carries its own Done-when. Implement every slice end-to-end: per slice run type-check + tests, commit per layer. {{include:verification}} {{include:tests}} {{HARNESS}} Follow the plan's Done-when for shipping — `/ship`, or `/ship <PR#>` to re-review an existing PR. {{include:review-loop}} {{include:stop-calls}}

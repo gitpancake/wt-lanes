@@ -22,6 +22,9 @@ for f in "$REPO_DIR"/scripts/*; do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claud
 for f in "$REPO_DIR"/hooks/*;   do [[ -e "$f" ]] && unlink_if_ours "$HOME/.claude/hooks/$(basename "$f")";   done
 unlink_if_ours "$HOME/.claude/agent-state-vocab.md"
 unlink_if_ours "$HOME/.claude/state-codes.sh"
+unlink_if_ours "$HOME/.claude/lane.config"
+unlink_if_ours "$HOME/.claude/render-prompt.sh"
+unlink_if_ours "$HOME/.claude/prompts"
 unlink_if_ours "$HOME/.claude/lane-windows.sh"
 unlink_if_ours "$HOME/.tmux/agent-board.sh"
 unlink_if_ours "$HOME/.tmux/lane-menu.sh"

@@ -1,0 +1,1 @@
+Autonomous mode. Plan at {{PLAN}}. Read it. Implement every slice end-to-end: per slice run type-check + tests, commit per layer, then move on. {{include:verification}} {{include:tests}} {{HARNESS}} After the final slice, run /ship. {{include:review-loop}} {{include:stop-calls}}

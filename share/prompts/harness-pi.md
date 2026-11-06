@@ -1,0 +1,1 @@
+Use Pi-native session discipline: /compact when context grows but the active path is coherent, /handoff before strategy changes. Load the matching Pi skill (tdd, diagnose, handoff) for specialized work.
